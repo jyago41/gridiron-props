@@ -4,6 +4,7 @@ Cost note: each /events/{id}/odds call costs (number of markets x regions) credi
 NFL Sunday with 5 prop markets is ~16 games x 5 = ~80 credits. The free tier is 500/month.
 """
 from datetime import datetime, timedelta, timezone
+import time
 import numpy as np
 import pandas as pd
 import requests
@@ -34,8 +35,13 @@ class OddsClient:
             params["bookmakers"] = ",".join(self.bookmakers)
         else:
             params["regions"] = self.regions
-        r = requests.get(f"{BASE}{path}", params=params, timeout=30)
+        for attempt in range(5):
+            r = requests.get(f"{BASE}{path}", params=params, timeout=30)
+            if r.status_code != 429:
+                break
+            time.sleep(2 * (attempt + 1))  # rate-limited: wait, then retry
         r.raise_for_status()
+        time.sleep(1)  # pause between calls so the free plan doesn't rate-limit us
         self.remaining = r.headers.get("x-requests-remaining")
         return r.json()
 

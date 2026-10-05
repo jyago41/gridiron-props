@@ -30,13 +30,20 @@ def get_models(league: str, history: pd.DataFrame, retrain: bool = False) -> dic
     return train_all(feat, feats, league)
 
 
-def live_slate(league, history, models, odds_key, model_weight, days_ahead=7, bookmakers=None, log=print):
+def live_slate(league, history, models, odds_key, model_weight, days_ahead=7, bookmakers=None, log=print, game=None):
     from odds import OddsClient, consolidate_props
     from slate import build_slate
     client = OddsClient(odds_key, bookmakers=bookmakers)
     games = client.game_lines(league, days_ahead)
+    if game:  # only spend credits on the game(s) asked for
+        games = games[games.home_team.str.contains(game, case=False) | games.away_team.str.contains(game, case=False)]
     log(f"{league.upper()}: {len(games)} games in the next {days_ahead} days")
-    raw = [client.player_props(league, eid) for eid in games["event_id"]]
+    raw = []
+    for eid in games["event_id"]:
+        try:
+            raw.append(client.player_props(league, eid))
+        except Exception as e:  # one bad game shouldn't kill the whole slate
+            log(f"skipped one game ({e})")
     raw = pd.concat([r for r in raw if not r.empty], ignore_index=True) if raw else pd.DataFrame()
     props = consolidate_props(raw)
     log(f"{league.upper()}: {len(props)} props pulled; {client.remaining} Odds API credits left")

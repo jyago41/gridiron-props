@@ -1,0 +1,8 @@
+nflreadpy>=0.1
+xgboost>=2.0
+pandas>=2.0
+numpy
+scikit-learn
+requests
+joblib
+streamlit>=1.40
