@@ -6,3 +6,4 @@ scikit-learn
 requests
 joblib
 streamlit>=1.40
+scipy

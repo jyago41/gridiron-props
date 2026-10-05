@@ -95,7 +95,7 @@ def build_slate(history: pd.DataFrame, games: pd.DataFrame, props: pd.DataFrame,
                                        ("Under", 1 - p_over, r.under_dec, r.under_book, 1 - p_model)):
             rows.append({"league": league.upper(), "event_id": r.event_id, "player_id": r.player_id,
                          "season": season, "week": next_week, "game": r.game, "commence_time": r.commence_time,
-                         "player": r.player, "team": x["team"].iloc[0], "market": r.market,
+                         "player": r.player, "team": x["team"].iloc[0], "pos_group": x["pos_group"].iloc[0], "market": r.market,
                          "market_label": MARKETS[r.market]["label"], "side": side, "line": r.line,
                          "projection": round(pred, 1), "p_model": pm,
                          "p_market": r.p_market_over if side == "Over" else 1 - r.p_market_over,

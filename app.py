@@ -10,6 +10,7 @@ from parlay import build_parlays
 from picklog import LOG_PATH, grade_log, load_log, save_picks
 from pipeline import get_models, live_games, live_props, load_history, seasons_back
 from slate import build_slate
+from sgp import american_to_dec, build_sgps, correlation_table
 
 st.set_page_config(page_title="Gridiron Props", page_icon="🏈", layout="wide")
 st.markdown("""
@@ -90,6 +91,13 @@ def cached_history(league, seasons, key):
 @st.cache_resource(max_entries=2, show_spinner="Training the models (first time takes a minute or two)…")
 def cached_models(league, seasons, key):
     return get_models(league, cached_history(league, seasons, key))
+
+
+@st.cache_resource(max_entries=2, show_spinner="Learning how player stats move together (one time)…")
+def cached_corr(league, seasons, key):
+    from features import build_features
+    feat, _ = build_features(cached_history(league, seasons, key))
+    return correlation_table(feat)
 
 
 SEASONS = tuple(seasons_back(4))
@@ -237,20 +245,61 @@ with tab_s:
         st.dataframe(leg_table(singles.to_dict("records")), hide_index=True, width="stretch")
 
 with tab_p:
-    if st.session_state.get("n_games", 0) < n_legs:
-        st.info(f"Parlays need {n_legs} different games (one bet per game). Choose more games, or use "
-                "single bets. Same-game parlays are riskier: the bets rise and fall together, and books "
-                "charge extra on them.")
-    elif not parlays:
-        st.info("Not enough good bets for parlays. Lower the minimum hit chance or use fewer legs.")
-    for i, pl in enumerate(parlays, 1):
-        st.markdown(
-            f"<div class='parlay-head'><span class='parlay-odds'>{pl['american']:+d}</span>"
-            f"<span class='parlay-stat'>Parlay {i}</span>"
-            f"<span class='parlay-stat'>Hit chance <b>{pl['hit_prob']:.1%}</b></span>"
-            f"<span class='parlay-stat'>Suggested stake <b>${bankroll * pl['kelly_stake_pct'] / 100:,.2f}</b></span>"
-            f"</div>", unsafe_allow_html=True)
-        st.dataframe(leg_table(pl["legs"]), hide_index=True, width="stretch")
+    n_games = st.session_state.get("n_games", 0)
+    ptype = st.radio("Parlay type", ["Same game", "Different games"], horizontal=True,
+                     index=0 if n_games < n_legs else 1)
+
+    if ptype == "Different games":
+        if n_games < n_legs:
+            st.info(f"Choose at least {n_legs} games for this type (one bet per game), "
+                    "or switch to Same game.")
+        elif not parlays:
+            st.info("Not enough good bets for parlays. Lower the minimum hit chance or use fewer legs.")
+        for i, pl in enumerate(parlays, 1):
+            st.markdown(
+                f"<div class='parlay-head'><span class='parlay-odds'>{pl['american']:+d}</span>"
+                f"<span class='parlay-stat'>Parlay {i}</span>"
+                f"<span class='parlay-stat'>Hit chance <b>{pl['hit_prob']:.1%}</b></span>"
+                f"<span class='parlay-stat'>Suggested stake <b>${bankroll * pl['kelly_stake_pct'] / 100:,.2f}</b></span>"
+                f"</div>", unsafe_allow_html=True)
+            st.dataframe(leg_table(pl["legs"]), hide_index=True, width="stretch")
+
+    else:
+        st.write("Stats in the same game move together, so these chances account for that. Your "
+                 "sportsbook sets its own payout for same-game parlays: build the parlay in your "
+                 "sportsbook app, then type its odds below to see if the price is worth it.")
+        with st.spinner("Simulating each game 20,000 times…"):
+            corr = {}
+            for lg in legs["league"].str.lower().unique():
+                corr.update(cached_corr(lg, SEASONS, cfbd_key))
+            sgps = build_sgps(legs, corr, n_parlays, n_legs, min_prob, max_dis)
+        if not sgps:
+            st.info("Not enough good bets in these games for a same-game parlay. Lower the minimum hit "
+                    "chance in Settings, use fewer legs, or try again closer to kickoff when more props are posted.")
+        for i, sg in enumerate(sgps, 1):
+            st.markdown(
+                f"<div class='parlay-head'><span class='parlay-odds'>{sg['fair_american']:+d}</span>"
+                f"<span class='parlay-stat'>Fair odds, same-game parlay {i}</span>"
+                f"<span class='parlay-stat'>Chance all hit <b>{sg['hit_prob']:.1%}</b></span>"
+                f"<span class='parlay-stat'>If the legs were unrelated <b>{sg['indep_prob']:.1%}</b></span>"
+                f"</div>", unsafe_allow_html=True)
+            st.caption(sg["game"])
+            st.dataframe(leg_table(sg["legs"]).drop(columns=["Game"]), hide_index=True, width="stretch")
+            book = st.number_input("Your sportsbook's odds for this parlay (e.g. 250 for +250)",
+                                   value=None, step=5, format="%d", key=f"sgp_price_{i}")
+            if book is not None:
+                if -100 < book < 100:
+                    st.error("American odds are +100 or higher, or -100 or lower.")
+                else:
+                    dec = american_to_dec(book)
+                    ev = sg["hit_prob"] * dec - 1
+                    if ev > 0:
+                        stake = bankroll * min(max((sg["hit_prob"] * dec - 1) / (dec - 1) * 0.25, 0), 0.02)
+                        st.success(f"Worth it: {int(book):+d} beats the fair price of {sg['fair_american']:+d}. "
+                                   f"Expected return {ev:+.1%}. Suggested stake ${stake:,.2f}.")
+                    else:
+                        st.warning(f"Skip it: {int(book):+d} pays less than the fair price of "
+                                   f"{sg['fair_american']:+d}. Expected return {ev:+.1%}.")
 
 with tab_n:
     st.write("The model and the sportsbook disagree a lot on these. That usually means news the model "
