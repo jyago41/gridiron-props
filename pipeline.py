@@ -48,3 +48,23 @@ def live_slate(league, history, models, odds_key, model_weight, days_ahead=7, bo
     props = consolidate_props(raw)
     log(f"{league.upper()}: {len(props)} props pulled; {client.remaining} Odds API credits left")
     return build_slate(history, games, props, models, league, model_weight)
+
+
+def live_games(league, odds_key, days_ahead=7):
+    from odds import OddsClient
+    return OddsClient(odds_key).game_lines(league, days_ahead)
+
+
+def live_props(league, odds_key, event_ids, log=print):
+    """Fetch + consolidate props for just the chosen games (each game costs ~5 credits)."""
+    from odds import OddsClient, consolidate_props
+    client = OddsClient(odds_key)
+    raw = []
+    for eid in event_ids:
+        try:
+            raw.append(client.player_props(league, eid))
+        except Exception as e:
+            log(f"Skipped one game ({e})")
+    raw = [r for r in raw if not r.empty]
+    props = consolidate_props(pd.concat(raw, ignore_index=True)) if raw else pd.DataFrame()
+    return props, client.remaining

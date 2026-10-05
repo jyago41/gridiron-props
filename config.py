@@ -22,9 +22,9 @@ ODDS_KEY_TO_MARKET = {v["odds_key"]: k for k, v in MARKETS.items()}
 SPORT_KEYS = {"nfl": "americanfootball_nfl", "cfb": "americanfootball_ncaaf"}
 
 XGB_PARAMS = dict(
-    n_estimators=500, learning_rate=0.03, max_depth=4, subsample=0.8,
+    n_estimators=350, learning_rate=0.04, max_depth=4, subsample=0.8,
     colsample_bytree=0.8, min_child_weight=5, reg_lambda=1.0,
-    objective="reg:squarederror", tree_method="hist", n_jobs=-1,
+    objective="reg:squarederror", tree_method="hist", n_jobs=2,  # free hosting has ~2 CPUs
 )
 
 

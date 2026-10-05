@@ -38,7 +38,7 @@ class PropModel:
         self.metrics = {}
 
     # ---------- training ----------
-    def fit(self, df: pd.DataFrame, features: list[str], n_folds: int = 5):
+    def fit(self, df: pd.DataFrame, features: list[str], n_folds: int = 4):
         data = df[eligible_mask(df, self.market) & df[self.stat].notna()].copy()
         data = data.sort_values("game_order")
         self.features = features

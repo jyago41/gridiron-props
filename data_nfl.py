@@ -11,11 +11,15 @@ def load_nfl(seasons: list[int]) -> pd.DataFrame:
     frames = []
     for s in seasons:  # load one season at a time so a not-yet-published season doesn't break everything
         try:
-            frames.append(nfl.load_player_stats([s]).to_pandas())
+            ps = nfl.load_player_stats([s])
+            keep = ["player_id", "player_display_name", "position", "season", "week", "season_type",
+                    "game_id", "team", "opponent_team"] + STAT_COLS
+            frames.append(ps.select([c for c in keep if c in ps.columns]).to_pandas())  # 17 of 150 columns
         except Exception as e:
             print(f"[nfl] skipping {s}: {e}")
     ps = pd.concat(frames, ignore_index=True)
-    sc = nfl.load_schedules(sorted(ps["season"].unique().tolist())).to_pandas()
+    sc = nfl.load_schedules(sorted(ps["season"].unique().tolist()))
+    sc = sc.select(["game_id", "home_team", "away_team", "spread_line", "total_line"]).to_pandas()
 
     ps = ps[ps["season_type"].isin(["REG", "POST"])]
     ps = ps[ps["position"].isin(POS_GROUP)].copy()

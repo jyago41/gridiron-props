@@ -21,10 +21,17 @@ def mock_slate(history: pd.DataFrame, n_games=10, seed=7):
     for g in range(min(n_games, len(teams) // 2)):
         home, away = teams[2 * g], teams[2 * g + 1]
         eid = f"demo{g}"
+        hs = float(rng.choice(np.arange(-7, 7.5, 0.5)))
+        p_home = float(np.clip(0.5 + hs * 0.03, 0.2, 0.8))
+        to_am = lambda p: round(-100 * p / (1 - p)) if p >= 0.5 else round(100 * (1 - p) / p)
         games.append({"event_id": eid, "commence_time": kickoff + timedelta(hours=3 * (g % 3)),
                       "home_team": ABBR_TO_NAME[home], "away_team": ABBR_TO_NAME[away],
-                      "home_spread": float(rng.choice(np.arange(-7, 7.5, 0.5))),
-                      "game_total": float(rng.choice(np.arange(38, 52.5, 0.5)))})
+                      "home_spread": hs, "game_total": float(rng.choice(np.arange(38, 52.5, 0.5))),
+                      "home_ml": to_am(min(p_home * 1.025, 0.95)), "home_ml_book": "DemoBook",
+                      "away_ml": to_am(min((1 - p_home) * 1.025, 0.95)), "away_ml_book": "DemoBook",
+                      "home_win_prob": p_home, "spread_home_price": -110, "spread_home_book": "DemoBook",
+                      "spread_away_price": -110, "spread_away_book": "DemoBook",
+                      "over_price": -110, "over_book": "DemoBook", "under_price": -110, "under_book": "DemoBook"})
         recent = last_season[last_season.team.isin([home, away])]
         recent = recent[recent.week >= recent.week.max() - 4]
         # books only post lines for players with an established role: must have played the team's

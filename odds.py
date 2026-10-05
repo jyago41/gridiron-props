@@ -46,26 +46,27 @@ class OddsClient:
         return r.json()
 
     def game_lines(self, league: str, days_ahead: int = 7) -> pd.DataFrame:
-        """Upcoming games with consensus spread (home perspective, + = home favored) and total."""
-        data = self._get(f"/sports/{SPORT_KEYS[league]}/odds", markets="spreads,totals")
+        """Upcoming games with moneyline, spread and total: consensus line, no-vig win chance,
+        and the best price on each side across books. (3 credits per call.)"""
+        data = self._get(f"/sports/{SPORT_KEYS[league]}/odds", markets="h2h,spreads,totals")
         now = datetime.now(timezone.utc)
         rows = []
         for ev in data:
             start = datetime.fromisoformat(ev["commence_time"].replace("Z", "+00:00"))
             if not (now < start < now + timedelta(days=days_ahead)):
                 continue
-            spreads, totals = [], []
+            home, away = ev["home_team"], ev["away_team"]
+            ml, sp, tot = [], [], []
             for bk in ev.get("bookmakers", []):
                 for mk in bk.get("markets", []):
                     for o in mk.get("outcomes", []):
-                        if mk["key"] == "spreads" and o["name"] == ev["home_team"]:
-                            spreads.append(-o["point"])
-                        elif mk["key"] == "totals" and o["name"] == "Over":
-                            totals.append(o["point"])
-            rows.append({"event_id": ev["id"], "commence_time": start, "home_team": ev["home_team"],
-                         "away_team": ev["away_team"],
-                         "home_spread": float(np.median(spreads)) if spreads else np.nan,
-                         "game_total": float(np.median(totals)) if totals else np.nan})
+                        rec = {"book": bk["title"], "name": o["name"], "price": o["price"], "point": o.get("point")}
+                        {"h2h": ml, "spreads": sp, "totals": tot}.get(mk["key"], []).append(rec)
+            row = {"event_id": ev["id"], "commence_time": start, "home_team": home, "away_team": away}
+            row.update(_moneyline(ml, home, away))
+            row.update(_spread(sp, home, away))
+            row.update(_total(tot))
+            rows.append(row)
         return pd.DataFrame(rows)
 
     def player_props(self, league: str, event_id: str) -> pd.DataFrame:
@@ -108,3 +109,55 @@ def consolidate_props(raw: pd.DataFrame) -> pd.DataFrame:
     out = out.merge(best_over[key + ["dec", "book"]].rename(columns={"dec": "over_dec", "book": "over_book"}), on=key)
     out = out.merge(best_under[key + ["dec", "book"]].rename(columns={"dec": "under_dec", "book": "under_book"}), on=key)
     return out.rename(columns={"point": "line"})
+
+
+# ---------- game-line helpers ----------
+def _best(recs):
+    """Best (highest-paying) price and its book from a list of outcome records."""
+    if not recs:
+        return np.nan, None
+    b = max(recs, key=lambda r: american_to_decimal(r["price"]))
+    return float(b["price"]), b["book"]
+
+
+def _moneyline(ml, home, away):
+    df = pd.DataFrame(ml)
+    out = {"home_ml": np.nan, "home_ml_book": None, "away_ml": np.nan, "away_ml_book": None, "home_win_prob": np.nan}
+    if df.empty:
+        return out
+    out["home_ml"], out["home_ml_book"] = _best(df[df.name == home].to_dict("records"))
+    out["away_ml"], out["away_ml_book"] = _best(df[df.name == away].to_dict("records"))
+    w = df.pivot_table(index="book", columns="name", values="price", aggfunc="first").dropna()
+    if home in w and away in w and len(w):
+        ph, pa = 1 / american_to_decimal(w[home]), 1 / american_to_decimal(w[away])
+        out["home_win_prob"] = float(np.mean(ph / (ph + pa)))  # vig removed, averaged across books
+    return out
+
+
+def _spread(sp, home, away):
+    df = pd.DataFrame(sp)
+    out = {"home_spread": np.nan, "spread_home_price": np.nan, "spread_home_book": None,
+           "spread_away_price": np.nan, "spread_away_book": None}
+    if df.empty:
+        return out
+    hp = df[df.name == home]
+    if hp.empty:
+        return out
+    pt = float(hp["point"].mode().iloc[0])            # consensus home line, e.g. -2.5
+    out["home_spread"] = -pt                          # + = home favored (model convention)
+    out["spread_home_price"], out["spread_home_book"] = _best(hp[hp.point == pt].to_dict("records"))
+    ap = df[(df.name == away) & (df.point == -pt)]
+    out["spread_away_price"], out["spread_away_book"] = _best(ap.to_dict("records"))
+    return out
+
+
+def _total(tot):
+    df = pd.DataFrame(tot)
+    out = {"game_total": np.nan, "over_price": np.nan, "over_book": None, "under_price": np.nan, "under_book": None}
+    if df.empty:
+        return out
+    pt = float(df[df.name == "Over"]["point"].mode().iloc[0])
+    out["game_total"] = pt
+    out["over_price"], out["over_book"] = _best(df[(df.name == "Over") & (df.point == pt)].to_dict("records"))
+    out["under_price"], out["under_book"] = _best(df[(df.name == "Under") & (df.point == pt)].to_dict("records"))
+    return out

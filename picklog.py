@@ -12,7 +12,7 @@ COLS = ["logged_at", "kind", "parlay_id", "league", "season", "week", "game", "p
         "market", "side", "line", "decimal", "book", "p_final", "actual", "result"]
 
 
-def save_picks(singles: pd.DataFrame, parlays: list[dict]):
+def save_picks(singles: pd.DataFrame, parlays: list[dict], path=LOG_PATH) -> int:
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
     rows = []
     for _, l in singles.iterrows():
@@ -22,19 +22,29 @@ def save_picks(singles: pd.DataFrame, parlays: list[dict]):
         for l in pl["legs"]:
             rows.append({**l, "kind": "parlay_leg", "parlay_id": pid})
     if not rows:
-        return
+        return 0
     df = pd.DataFrame(rows).assign(logged_at=now, actual=None, result=None).reindex(columns=COLS)
-    os.makedirs(os.path.dirname(LOG_PATH) or ".", exist_ok=True)
-    df.to_csv(LOG_PATH, mode="a", header=not os.path.exists(LOG_PATH), index=False)
-    print(f"\nSaved {len(df)} picks to {LOG_PATH}")
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    df.to_csv(path, mode="a", header=not os.path.exists(path), index=False)
+    print(f"\nSaved {len(df)} picks to {path}")
+    return len(df)
 
 
-def grade():
-    if not os.path.exists(LOG_PATH):
-        print("No picks logged yet. Run with --log first.")
-        return
-    log = pd.read_csv(LOG_PATH, dtype={"result": object, "player_id": str, "parlay_id": str})
+def load_log(path=LOG_PATH) -> pd.DataFrame:
+    if not os.path.exists(path):
+        return pd.DataFrame(columns=COLS)
+    log = pd.read_csv(path, dtype={"result": object, "player_id": str, "parlay_id": str})
     log["actual"] = log["actual"].astype(float)
+    return log
+
+
+def grade_log(path=LOG_PATH) -> tuple[pd.DataFrame, dict]:
+    """Fill in results for finished games. Returns (log, summary)."""
+    log = load_log(path)
+    summary = {"singles_w": 0, "singles_l": 0, "singles_profit": 0.0,
+               "parlays_w": 0, "parlays_l": 0, "parlays_profit": 0.0, "pending": 0}
+    if log.empty:
+        return log, summary
     todo = log["result"].isna() & (log["league"] == "NFL")
     if todo.any():
         import nflreadpy as nfl
@@ -51,23 +61,38 @@ def grade():
             log.at[i, "actual"] = actual
             log.at[i, "result"] = "push" if actual == line else (
                 "win" if (actual > line) == (side == "Over") else "loss")
-        log.to_csv(LOG_PATH, index=False)
+        log.to_csv(path, index=False)
 
     done = log[log["result"].notna()]
     singles = done[done.kind == "single"]
     if len(singles):
-        w, l = (singles.result == "win").sum(), (singles.result == "loss").sum()
-        profit = (singles.result == "win") * (singles.decimal - 1) - (singles.result == "loss") * 1.0
-        print(f"Single bets: {w}-{l}  hit rate {w / max(w + l, 1):.1%}  profit {profit.sum():+.2f} units "
-              f"(1 unit per bet; break-even hit rate at -110 is 52.4%)")
+        summary["singles_w"] = int((singles.result == "win").sum())
+        summary["singles_l"] = int((singles.result == "loss").sum())
+        summary["singles_profit"] = float(((singles.result == "win") * (singles.decimal - 1)
+                                           - (singles.result == "loss") * 1.0).sum())
     legs = done[done.kind == "parlay_leg"]
     if len(legs):
         g = legs.groupby("parlay_id")
-        full = g.size() == log[log.kind == "parlay_leg"].groupby("parlay_id").size().reindex(g.size().index)
-        res = g.apply(lambda d: "loss" if (d.result == "loss").any() else "win")[full]
-        dec = g["decimal"].prod()[full]
-        profit = ((res == "win") * (dec - 1) - (res == "loss")).sum()
-        print(f"Parlays: {(res == 'win').sum()}-{(res == 'loss').sum()}  profit {profit:+.2f} units")
-    pending = log["result"].isna().sum()
-    if pending:
-        print(f"{pending} picks still waiting on results (stats post the morning after games).")
+        total = log[log.kind == "parlay_leg"].groupby("parlay_id").size()
+        lost = g.apply(lambda d: (d.result == "loss").any())
+        finished = lost | (g.size() == total.reindex(g.size().index))  # one loss settles a parlay
+        lost, dec = lost[finished], g["decimal"].prod()[finished]
+        summary["parlays_w"], summary["parlays_l"] = int((~lost).sum()), int(lost.sum())
+        summary["parlays_profit"] = float(((~lost) * (dec - 1) - lost).sum())
+    summary["pending"] = int(log["result"].isna().sum())
+    return log, summary
+
+
+def grade(path=LOG_PATH):
+    if not os.path.exists(path):
+        print("No picks logged yet. Run with --log first.")
+        return
+    _, s = grade_log(path)
+    w, l = s["singles_w"], s["singles_l"]
+    if w + l:
+        print(f"Single bets: {w}-{l}  hit rate {w / (w + l):.1%}  profit {s['singles_profit']:+.2f} units "
+              f"(1 unit per bet; break-even hit rate at -110 is 52.4%)")
+    if s["parlays_w"] + s["parlays_l"]:
+        print(f"Parlays: {s['parlays_w']}-{s['parlays_l']}  profit {s['parlays_profit']:+.2f} units")
+    if s["pending"]:
+        print(f"{s['pending']} picks still waiting on results (stats post the morning after games).")
