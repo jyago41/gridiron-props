@@ -118,6 +118,8 @@ def build_slate_mlb(history, games, props, models, model_weight=0.5, sched=None,
         lu = lineup_status(r.player_id, side_, posted[r.game_ref], info[side_])
         for side, p, dec, book, pm in (("Over", p_over, r.over_dec, r.over_book, p_model),
                                        ("Under", 1 - p_over, r.under_dec, r.under_book, 1 - p_model)):
+            if pd.isna(dec):          # milestone lines are usually Over-only
+                continue
             rows.append({"league": "MLB", "event_id": r.event_id, "player_id": r.player_id, "season": r.season,
                          "week": 0, "game_ref": r.game_ref, "game": r.game, "commence_time": r.commence_time,
                          "player": r.player, "team": x["team"].iloc[0], "pos_group": x["pos_group"].iloc[0],
@@ -129,4 +131,4 @@ def build_slate_mlb(history, games, props, models, model_weight=0.5, sched=None,
     if out.empty:
         return out
     out["disagreement"] = (out["p_model"] - out["p_market"]).abs()
-    return out.sort_values("ev", ascending=False).drop_duplicates(["event_id", "player", "market"]).reset_index(drop=True)
+    return out.sort_values("ev", ascending=False).reset_index(drop=True)

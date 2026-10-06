@@ -9,7 +9,7 @@ import numpy as np
 import pandas as pd
 import requests
 
-from config import MARKETS, ODDS_KEY_TO_MARKET, SPORT_KEYS, markets_for
+from config import ALT_KEYS, MARKETS, ODDS_KEY_TO_MARKET, SPORT_KEYS, markets_for
 
 BASE = "https://api.the-odds-api.com/v4"
 
@@ -69,10 +69,13 @@ class OddsClient:
             rows.append(row)
         return pd.DataFrame(rows)
 
-    def player_props(self, league: str, event_id: str, markets: list[str] | None = None) -> pd.DataFrame:
-        """markets: our market keys to pull (default: all for the league). Each costs ~1 credit."""
+    def player_props(self, league: str, event_id: str, markets: list[str] | None = None,
+                     alternates: bool = True) -> pd.DataFrame:
+        """markets: our market keys to pull (default: all for the league). Each costs ~1 credit;
+        alternates (milestone X+ lines) cost 1 more per market."""
         chosen = markets or list(markets_for(league))
-        markets = ",".join(MARKETS[m]["odds_key"] for m in chosen)
+        keys = [MARKETS[m]["odds_key"] for m in chosen] + ([MARKETS[m]["alt_key"] for m in chosen] if alternates else [])
+        markets = ",".join(keys)
         data = self._get(f"/sports/{SPORT_KEYS[league]}/events/{event_id}/odds", markets=markets)
         rows = []
         for bk in data.get("bookmakers", []):
@@ -84,33 +87,49 @@ class OddsClient:
                         continue
                     rows.append({"event_id": event_id, "book": bk["title"],
                                  "market": ODDS_KEY_TO_MARKET[mk["key"]], "player": o.get("description"),
-                                 "side": o["name"], "point": float(o["point"]), "price": float(o["price"])})
+                                 "side": o["name"], "point": float(o["point"]), "price": float(o["price"]),
+                                 "alt": mk["key"] in ALT_KEYS})
         return pd.DataFrame(rows)
 
 
+DEFAULT_ALT_HOLD = 0.08   # typical sportsbook margin on one-sided milestone lines
+
+
 def consolidate_props(raw: pd.DataFrame) -> pd.DataFrame:
-    """One row per (event, player, market): consensus line, no-vig market probability,
-    and the best available price on each side across books (line shopping)."""
+    """One row per (event, player, market, line), for EVERY line the books post (main + milestones):
+    the book's fair (no-vig) chance of the Over, and the best price on each side at that line.
+    Milestone lines are often Over-only; their fair chance is estimated by removing a typical margin."""
     if raw.empty:
         return raw
     raw = raw.assign(dec=american_to_decimal(raw["price"]))
+    if "alt" not in raw:
+        raw["alt"] = False
     key = ["event_id", "player", "market"]
-    # consensus line = most commonly posted point
-    mode_pt = (raw.groupby(key + ["point"]).size().reset_index(name="n")
-                  .sort_values("n", ascending=False).drop_duplicates(key)[key + ["point"]])
-    at = raw.merge(mode_pt, on=key + ["point"])
+    line = key + ["point"]
 
-    wide = at.pivot_table(index=key + ["point", "book"], columns="side", values="dec", aggfunc="max").reset_index()
-    wide = wide.dropna(subset=["Over", "Under"])
-    wide["p_over_novig"] = (1 / wide["Over"]) / (1 / wide["Over"] + 1 / wide["Under"])
+    # two-way prices at the same line & book -> exact no-vig probability + that book's margin
+    wide = raw.pivot_table(index=line + ["book"], columns="side", values="dec", aggfunc="max").reset_index()
+    for s in ("Over", "Under"):
+        if s not in wide:
+            wide[s] = np.nan
+    two = wide.dropna(subset=["Over", "Under"]).copy()
+    two["p_nv"] = (1 / two["Over"]) / (1 / two["Over"] + 1 / two["Under"])
+    two["hold"] = 1 / two["Over"] + 1 / two["Under"] - 1
+    p_two = two.groupby(line, as_index=False)["p_nv"].mean()
+    hold = two.groupby(key, as_index=False)["hold"].median().rename(columns={"hold": "hold_pm"})
 
-    best_over = at[at.side == "Over"].sort_values("dec", ascending=False).drop_duplicates(key)
-    best_under = at[at.side == "Under"].sort_values("dec", ascending=False).drop_duplicates(key)
-    out = (wide.groupby(key + ["point"], as_index=False)
-               .agg(p_market_over=("p_over_novig", "mean"), n_books=("book", "nunique")))
-    out = out.merge(best_over[key + ["dec", "book"]].rename(columns={"dec": "over_dec", "book": "over_book"}), on=key)
-    out = out.merge(best_under[key + ["dec", "book"]].rename(columns={"dec": "under_dec", "book": "under_book"}), on=key)
-    return out.rename(columns={"point": "line"})
+    out = raw.groupby(line, as_index=False).agg(n_books=("book", "nunique"), alt=("alt", "min"))
+    best = lambda s: (raw[raw.side == s].sort_values("dec", ascending=False).drop_duplicates(line)
+                      [line + ["dec", "book"]].rename(columns={"dec": f"{s.lower()}_dec", "book": f"{s.lower()}_book"}))
+    out = out.merge(best("Over"), on=line, how="left").merge(best("Under"), on=line, how="left")
+    mean_imp = lambda s: (raw[raw.side == s].assign(imp=lambda d: 1 / d.dec).groupby(line, as_index=False)["imp"]
+                          .mean().rename(columns={"imp": f"imp_{s.lower()}"}))
+    out = (out.merge(p_two, on=line, how="left").merge(hold, on=key, how="left")
+              .merge(mean_imp("Over"), on=line, how="left").merge(mean_imp("Under"), on=line, how="left"))
+    h = np.maximum(out["hold_pm"].fillna(DEFAULT_ALT_HOLD), 0.04) + np.where(out["alt"], 0.02, 0.0)
+    est = np.where(out["imp_over"].notna(), out["imp_over"] / (1 + h), 1 - out["imp_under"] / (1 + h))
+    out["p_market_over"] = out["p_nv"].fillna(pd.Series(est, index=out.index)).clip(0.01, 0.99)
+    return out.drop(columns=["p_nv", "hold_pm", "imp_over", "imp_under"]).rename(columns={"point": "line"})
 
 
 # ---------- game-line helpers ----------

@@ -25,7 +25,15 @@ MARKETS = {
     "mlb_outs":   {"stat": "p_outs",       "positions": ["SP"], "usage": "p_bf", "min_usage": 15, "odds_key": "pitcher_outs",           "label": "Pitcher outs",       "sports": ("mlb",), "role": "SP"},
     "mlb_hits_a": {"stat": "p_hits",       "positions": ["SP"], "usage": "p_bf", "min_usage": 15, "odds_key": "pitcher_hits_allowed",   "label": "Hits allowed",       "sports": ("mlb",), "role": "SP", "objective": "count:poisson"},
 }
+for _m in MARKETS.values():
+    _m["alt_key"] = _m["odds_key"] + "_alternate"   # milestone (X+) lines, e.g. batter_hits_alternate
 ODDS_KEY_TO_MARKET = {v["odds_key"]: k for k, v in MARKETS.items()}
+ODDS_KEY_TO_MARKET.update({v["alt_key"]: k for k, v in MARKETS.items()})
+ALT_KEYS = {v["alt_key"] for v in MARKETS.values()}
+
+# sportsbooks you can bet at (display name -> The Odds API bookmaker key)
+BOOKS = {"DraftKings": "draftkings", "FanDuel": "fanduel", "BetMGM": "betmgm", "Caesars": "williamhill_us",
+         "Fanatics": "fanatics", "BetRivers": "betrivers"}
 
 SPORT_KEYS = {"nfl": "americanfootball_nfl", "cfb": "americanfootball_ncaaf", "mlb": "baseball_mlb"}
 

@@ -98,6 +98,8 @@ def build_slate(history: pd.DataFrame, games: pd.DataFrame, props: pd.DataFrame,
         p_over = model_weight * p_model + (1 - model_weight) * r.p_market_over
         for side, p, dec, book, pm in (("Over", p_over, r.over_dec, r.over_book, p_model),
                                        ("Under", 1 - p_over, r.under_dec, r.under_book, 1 - p_model)):
+            if pd.isna(dec):          # milestone lines are usually Over-only
+                continue
             rows.append({"league": league.upper(), "event_id": r.event_id, "player_id": r.player_id,
                          "season": season, "week": next_week, "game": r.game, "commence_time": r.commence_time,
                          "player": r.player, "team": x["team"].iloc[0], "pos_group": x["pos_group"].iloc[0], "market": r.market,
@@ -110,4 +112,4 @@ def build_slate(history: pd.DataFrame, games: pd.DataFrame, props: pd.DataFrame,
     # it's usually missing news (injury, benching, role change). Flag it; parlays skip these.
     out["disagreement"] = (out["p_model"] - out["p_market"]).abs()
     # keep only the better side of each prop
-    return out.sort_values("ev", ascending=False).drop_duplicates(["event_id", "player", "market"]).reset_index(drop=True)
+    return out.sort_values("ev", ascending=False).reset_index(drop=True)

@@ -5,7 +5,7 @@ import os
 import pandas as pd
 import streamlit as st
 
-from config import MARKETS, markets_for
+from config import BOOKS, MARKETS, markets_for
 from parlay import build_parlays
 from picklog import LOG_PATH, grade_log, load_log, save_picks
 from pipeline import get_models, live_games, live_props, load_history, seasons_for
@@ -63,7 +63,7 @@ def val(row, col):
     return None if v is None or (not isinstance(v, str) and pd.isna(v)) else v
 
 
-CREDITS_PER_GAME = {"nfl": 5, "cfb": 5}
+FOOTBALL_MARKETS = 5
 ODDS_KEY, CFBD_KEY = secret("ODDS_API_KEY"), secret("CFBD_API_KEY")
 
 
@@ -99,8 +99,17 @@ with st.sidebar:
         ODDS_KEY = st.text_input("The Odds API key", type="password")
     fb_live = st.toggle("Football: use real sportsbook lines", value=bool(ODDS_KEY),
                         help="Off = practice NFL lines, no API key needed. MLB always uses real lines.")
+    st.subheader("Your sportsbook")
+    my_books = st.multiselect("Only show bets I can place at", list(BOOKS), default=["DraftKings"],
+                              help="Lines and prices come only from these books, so every pick matches your app.")
+    book_keys = [BOOKS[b] for b in my_books] or None
+    use_alts = st.toggle("Include milestone bets (2+, 3+, 75+ yards…)", value=True,
+                         help="Pulls the X+ ladder your sportsbook offers. Costs about twice the credits.")
+    skip_one_plus = st.toggle("Skip 1+ bets (Over 0.5)", value=True,
+                              help="Many books don't offer 1+ on hits, total bases, and similar props.")
     st.subheader("How careful to be")
-    min_prob = st.slider("Minimum hit chance per bet", 0.50, 0.75, 0.55, 0.01)
+    min_prob = st.slider("Minimum hit chance per bet", 0.20, 0.75, 0.55, 0.01,
+                         help="Lower it (and set Optimize for: value) to see milestone bets like 2+ hits, which hit less often but pay more.")
     model_weight = st.slider("Trust in model vs. sportsbook", 0.0, 1.0, 0.3, 0.05,
                              help="Lower = lean on the sportsbook more. 0.3 is a sensible, cautious default.")
     max_dis = st.slider("Flag bets where model and book disagree by more than", 0.10, 0.50, 0.25, 0.05)
@@ -114,10 +123,26 @@ st.title("Gridiron Props")
 
 
 # ====================== shared result sections ======================
+def bet_text(side, line, label):
+    """'Over 1.5 hits' -> '2+ hits', the way sportsbooks show milestones."""
+    label = label.lower()
+    if side == "Over" and abs(line % 1 - 0.5) < 1e-9:
+        return f"{int(line + 0.5)}+ {label}"
+    return f"{side} {line:g} {label}"
+
+
+def best_lines(df):
+    """One bet per player and stat: the line that best fits your 'Optimize for' choice."""
+    if df.empty:
+        return df
+    by = "p_final" if mode == "safest" else "ev"
+    return df.sort_values(by, ascending=False).drop_duplicates(["event_id", "player", "market"])
+
+
 def leg_table(rows, mlb=False):
     out = []
     for r in rows:
-        d = {"Player": r["player"], "Bet": f"{r['side']} {r['line']:g} {r['market_label'].lower()}",
+        d = {"Player": r["player"], "Bet": bet_text(r["side"], r["line"], r["market_label"]),
              "Projection": r["projection"], "Hit chance": f"{r['p_final']:.0%}",
              "Book says": f"{r['p_market']:.0%}", "Price": american(r["decimal"]), "Book": r["book"]}
         if mlb:
@@ -277,7 +302,7 @@ def sport_page(ns: str):
             for lg in leagues:
                 try:
                     if live:
-                        g = live_games(lg, ODDS_KEY)
+                        g = live_games(lg, ODDS_KEY, bookmakers=book_keys)
                     else:
                         from demo import mock_slate
                         g, p = mock_slate(cached_history(lg, CFBD_KEY))
@@ -362,9 +387,9 @@ def sport_page(ns: str):
     # ---------- 3. picks ----------
     st.markdown("<div class='step'>3. Get picks</div>", unsafe_allow_html=True)
     if live:
-        per = len(market_keys) if mlb else None
-        cost = sum(per if mlb else CREDITS_PER_GAME[l] for l in sel["league"])
-        st.caption(f"Getting picks uses about {cost} Odds API credits.")
+        per = (len(market_keys) if mlb else FOOTBALL_MARKETS) * (2 if use_alts else 1)
+        st.caption(f"Getting picks uses about {per * len(sel)} Odds API credits"
+                   f"{' (milestone bets double it)' if use_alts else ''}.")
     if st.button("Get picks", type="primary", width="stretch", key=f"{ns}_go", disabled=mlb and not market_keys):
         all_legs = []
         for lg, g in sel.groupby("league"):
@@ -374,7 +399,7 @@ def sport_page(ns: str):
                     models = cached_models(lg, CFBD_KEY)
                     if live:
                         props, remaining = live_props(lg, ODDS_KEY, g["event_id"].tolist(), log=st.caption,
-                                                      markets=market_keys)
+                                                      markets=market_keys, bookmakers=book_keys, alternates=use_alts)
                         st.session_state["credits"] = remaining
                     else:
                         dp = st.session_state[f"{ns}_demo_props"]
@@ -399,10 +424,14 @@ def sport_page(ns: str):
     # MLB: batters not in the posted lineup / pitchers who aren't starting are never picks
     blocked = legs["lineup"].isin(["Not in lineup", "Not the listed starter"]) if mlb and "lineup" in legs \
         else pd.Series(False, index=legs.index)
+    if skip_one_plus:
+        legs = legs[~((legs.side == "Over") & (legs.line == 0.5))]
+        blocked = blocked.loc[legs.index]
     usable = legs[~blocked]
-    ok = usable[(usable.ev > 0) & (usable.p_final >= min_prob) & (usable.disagreement <= max_dis)]
-    singles = ok.sort_values("p_final", ascending=False).head(10)
-    flagged = legs[((legs.ev > 0) & (legs.disagreement > max_dis)) | blocked]
+    ok = best_lines(usable[(usable.ev > 0) & (usable.p_final >= min_prob) & (usable.disagreement <= max_dis)])
+    singles = ok.sort_values("p_final" if mode == "safest" else "ev", ascending=False).head(10)
+    flagged = legs[((legs.ev > 0) & (legs.disagreement > max_dis)) | blocked] \
+        .sort_values("disagreement", ascending=False).drop_duplicates(["event_id", "player", "market"])
     sports = sorted(legs["league"].str.lower().unique())
 
     names = ["Safest bets", "Parlays"] + (["Pitching matchups"] if mlb else []) + \
@@ -410,8 +439,8 @@ def sport_page(ns: str):
     tabs = dict(zip(names, st.tabs(names)))
 
     with tabs["Safest bets"]:
-        st.write("Single bets the model likes that the sportsbook doesn't strongly disagree with. "
-                 "These are the most conservative plays.")
+        st.write("Single bets the model likes that the sportsbook doesn't strongly disagree with, "
+                 + ("most likely to hit first." if mode == "safest" else "best expected return first."))
         if mlb and (usable["lineup"] == "Lineup not posted yet").any():
             st.caption("Some lineups aren't posted yet (usually 2 to 4 hours before first pitch). "
                        "Re-run closer to game time to confirm every batter is playing.")
@@ -420,7 +449,7 @@ def sport_page(ns: str):
         else:
             st.dataframe(leg_table(singles.to_dict("records"), mlb), hide_index=True, width="stretch")
     with tabs["Parlays"]:
-        parlays = parlays_section(ns, usable, st.session_state.get(f"{ns}_n_games", 0), sports)
+        parlays = parlays_section(ns, ok, st.session_state.get(f"{ns}_n_games", 0), sports)
     if mlb:
         with tabs["Pitching matchups"]:
             pitching_matchups(st.session_state.get(f"{ns}_sel", sel), cached_history("mlb", CFBD_KEY))
