@@ -1,6 +1,6 @@
 # Gridiron Props
 
-XGBoost projections for NFL and college football player props, turned into the best 5–6 parlays for the upcoming weekend.
+XGBoost projections for NFL, college football and MLB player props, turned into the best 5–6 parlays for the upcoming weekend.
 
 ## Quick start
 
@@ -29,6 +29,10 @@ CLI equivalent: `python train.py --league nfl cfb --parlays --live --mode safest
 | `odds.py` | Pulls lines from every book, finds the consensus line, strips the vig, and line-shops the best price. |
 | `slate.py` | Matches props to players, projects each, blends model probability with the market's, computes EV. |
 | `parlay.py` | Beam search for the best non-overlapping parlays (one leg per game, each leg +EV on its own), with quarter-Kelly stake sizing. |
+| `data_mlb.py` | MLB box scores from the official MLB Stats API (free, no key), cached per season |
+| `features_mlb.py` | Batter form and per-PA rates, lineup spot, opposing starter, team offense/defense, ballpark; pitcher form vs. opposing lineup |
+| `slate_mlb.py` | Matches MLB props to players, pulls probable pitchers for each game |
+| `sgp.py` | Same-game parlays: learns how stats move together, simulates the game, prices fair odds |
 | `app.py` | Streamlit front end. |
 
 ## Things to know before you bet a dollar

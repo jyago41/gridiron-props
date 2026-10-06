@@ -8,7 +8,7 @@ import streamlit as st
 from config import MARKETS
 from parlay import build_parlays
 from picklog import LOG_PATH, grade_log, load_log, save_picks
-from pipeline import get_models, live_games, live_props, load_history, seasons_back
+from pipeline import get_models, live_games, live_props, load_history, seasons_for
 from slate import build_slate
 from sgp import american_to_dec, build_sgps, correlation_table
 
@@ -41,6 +41,9 @@ def american(dec):
 
 def short(team, league):
     """'New Orleans Saints' -> 'Saints' for the NFL; college names stay whole."""
+    if league == "mlb":   # 'Boston Red Sox' -> 'Red Sox', 'New York Yankees' -> 'Yankees'
+        w = team.split()
+        return " ".join(w[-2:]) if w[-1] in ("Sox", "Jays") else w[-1]
     return team.split()[-1] if league == "nfl" else team
 
 
@@ -55,13 +58,14 @@ def kickoff(t):
     return pd.Timestamp(t).tz_convert("America/New_York").strftime("%a %-I:%M %p ET")
 
 
-LEAGUES = {"NFL": "nfl", "College": "cfb"}
+LEAGUES = {"NFL": "nfl", "College": "cfb", "MLB": "mlb"}
+CREDITS_PER_GAME = {"nfl": 5, "cfb": 5, "mlb": 6}
 
 # ---------------- settings (sidebar, collapsed on phones) ----------------
 with st.sidebar:
     st.header("Settings")
     live = st.toggle("Use real sportsbook lines", value=bool(secret("ODDS_API_KEY")),
-                     help="Off = practice lines, no API key needed.")
+                     help="Off = practice NFL lines, no API key needed.")
     leagues = st.multiselect("Leagues", list(LEAGUES), default=["NFL"]) if live else ["NFL"]
     odds_key = secret("ODDS_API_KEY")
     cfbd_key = secret("CFBD_API_KEY")
@@ -83,24 +87,22 @@ with st.sidebar:
     bankroll = st.number_input("Bankroll ($)", 0, 1_000_000, 500, 50)
 
 
-@st.cache_resource(ttl=6 * 3600, max_entries=2, show_spinner="Loading player stats…")
-def cached_history(league, seasons, key):
-    return load_history(league, list(seasons), key)
+@st.cache_resource(ttl=6 * 3600, max_entries=3,
+                   show_spinner="Loading player stats (baseball's first load downloads ~5,000 box scores, a few minutes)…")
+def cached_history(league, key):
+    return load_history(league, seasons_for(league), key)
 
 
-@st.cache_resource(max_entries=2, show_spinner="Training the models (first time takes a minute or two)…")
-def cached_models(league, seasons, key):
-    return get_models(league, cached_history(league, seasons, key))
+@st.cache_resource(max_entries=3, show_spinner="Training the models (first time takes a minute or two)…")
+def cached_models(league, key):
+    return get_models(league, cached_history(league, key))
 
 
-@st.cache_resource(max_entries=2, show_spinner="Learning how player stats move together (one time)…")
-def cached_corr(league, seasons, key):
+@st.cache_resource(max_entries=3, show_spinner="Learning how player stats move together (one time)…")
+def cached_corr(league, key):
     from features import build_features
-    feat, _ = build_features(cached_history(league, seasons, key))
+    feat, _ = build_features(cached_history(league, key))
     return correlation_table(feat)
-
-
-SEASONS = tuple(seasons_back(4))
 
 st.title("Gridiron Props")
 st.caption("Practice lines" if not live else "Live sportsbook lines")
@@ -120,7 +122,7 @@ if st.button("Find this week's games", width="stretch"):
                     g = live_games(lg, odds_key)
                 else:
                     from demo import mock_slate
-                    g, p = mock_slate(cached_history(lg, SEASONS, cfbd_key))
+                    g, p = mock_slate(cached_history(lg, cfbd_key))
                     demo_props.append(p)
                 frames.append(g.assign(league=lg))
             except Exception as e:
@@ -186,7 +188,8 @@ if chosen:
         st.caption("Best price across sportsbooks, with the book in parentheses. Win chance is the "
                    "sportsbooks' own estimate with their cut removed. These are market odds, not model picks.")
 if live and chosen:
-    st.caption(f"Getting picks uses about {5 * len(chosen)} Odds API credits.")
+    cost = sum(CREDITS_PER_GAME[l] for l in games.loc[games["label"].isin(chosen), "league"])
+    st.caption(f"Getting picks uses about {cost} Odds API credits.")
 
 st.markdown("<div class='step'>3. Get picks</div>", unsafe_allow_html=True)
 if st.button("Get picks", type="primary", width="stretch", disabled=not chosen):
@@ -195,8 +198,8 @@ if st.button("Get picks", type="primary", width="stretch", disabled=not chosen):
     for lg, g in sel.groupby("league"):
         with st.spinner(f"Running the {lg.upper()} models…"):
             try:
-                hist = cached_history(lg, SEASONS, cfbd_key)
-                models = cached_models(lg, SEASONS, cfbd_key)
+                hist = cached_history(lg, cfbd_key)
+                models = cached_models(lg, cfbd_key)
                 if live:
                     props, remaining = live_props(lg, odds_key, g["event_id"].tolist(), log=st.caption)
                     st.session_state["credits"] = remaining
@@ -271,7 +274,7 @@ with tab_p:
         with st.spinner("Simulating each game 20,000 times…"):
             corr = {}
             for lg in legs["league"].str.lower().unique():
-                corr.update(cached_corr(lg, SEASONS, cfbd_key))
+                corr.update(cached_corr(lg, cfbd_key))
             sgps = build_sgps(legs, corr, n_parlays, n_legs, min_prob, max_dis)
         if not sgps:
             st.info("Not enough good bets in these games for a same-game parlay. Lower the minimum hit "

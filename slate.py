@@ -1,5 +1,6 @@
 """Turn this week's games + props into scored betting legs using the trained models."""
 import re
+import unicodedata
 import numpy as np
 import pandas as pd
 
@@ -19,7 +20,8 @@ NFL_TEAMS = {
 
 
 def norm_name(s: str) -> str:
-    s = re.sub(r"[^a-z ]", "", str(s).lower().replace("-", " "))
+    s = unicodedata.normalize("NFKD", str(s)).encode("ascii", "ignore").decode()   # José -> Jose
+    s = re.sub(r"[^a-z ]", "", s.lower().replace("-", " "))
     return " ".join(re.sub(r"\b(jr|sr|ii|iii|iv|v)\b", "", s).split())
 
 
@@ -48,6 +50,9 @@ def build_slate(history: pd.DataFrame, games: pd.DataFrame, props: pd.DataFrame,
     Books are efficient; trusting the model 100% overstates edges. 0.3-0.5 is sane."""
     if games.empty or props.empty:
         return pd.DataFrame()
+    if league == "mlb":
+        from slate_mlb import build_slate_mlb
+        return build_slate_mlb(history, games, props, models, model_weight)
     known = set(history["team"].unique())
     games = games.assign(home=games["home_team"].map(lambda t: resolve_team(t, league, known)),
                          away=games["away_team"].map(lambda t: resolve_team(t, league, known)))

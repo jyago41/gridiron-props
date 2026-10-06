@@ -2,7 +2,7 @@
 import os
 import pandas as pd
 
-from config import MARKETS, current_season
+from config import current_mlb_season, current_season, markets_for
 from features import build_features
 from model import PropModel, train_all
 
@@ -12,7 +12,17 @@ def seasons_back(n=4):
     return list(range(cur - n + 1, cur + 1))
 
 
-def load_history(league: str, seasons: list[int], cfbd_key: str | None = None) -> pd.DataFrame:
+def seasons_for(league: str) -> list[int]:
+    if league == "mlb":           # baseball plays ~2,400 games a year, so two seasons is plenty
+        y = current_mlb_season()
+        return [y - 1, y]
+    return seasons_back(4)
+
+
+def load_history(league: str, seasons: list[int], cfbd_key: str | None = None, log=print) -> pd.DataFrame:
+    if league == "mlb":
+        from data_mlb import load_mlb
+        return load_mlb(seasons, log=log)
     if league == "nfl":
         from data_nfl import load_nfl
         return load_nfl(seasons)
@@ -23,9 +33,10 @@ def load_history(league: str, seasons: list[int], cfbd_key: str | None = None) -
 
 
 def get_models(league: str, history: pd.DataFrame, retrain: bool = False) -> dict:
-    paths = [PropModel(league, m).path() for m in MARKETS]
+    mk = markets_for(league)
+    paths = [PropModel(league, m).path() for m in mk]
     if not retrain and all(os.path.exists(p) for p in paths):
-        return {m: PropModel.load(league, m) for m in MARKETS}
+        return {m: PropModel.load(league, m) for m in mk}
     feat, feats = build_features(history)
     return train_all(feat, feats, league)
 

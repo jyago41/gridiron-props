@@ -18,7 +18,10 @@ def _rolling_prior(df, keys, col, w):
             .reset_index(level=list(range(len(keys))), drop=True))
 
 
-def build_features(df: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
+def build_features(df: pd.DataFrame, extra_games=None):
+    if len(df) and df["league"].iloc[0] == "mlb":
+        from features_mlb import build_features_mlb
+        return build_features_mlb(df, extra_games)
     df = df.copy()
     df["game_order"] = df["season"] * 100 + df["week"]
     df = df.sort_values(["player_id", "game_order"]).reset_index(drop=True)

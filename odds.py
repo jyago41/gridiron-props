@@ -9,7 +9,7 @@ import numpy as np
 import pandas as pd
 import requests
 
-from config import MARKETS, ODDS_KEY_TO_MARKET, SPORT_KEYS
+from config import MARKETS, ODDS_KEY_TO_MARKET, SPORT_KEYS, markets_for
 
 BASE = "https://api.the-odds-api.com/v4"
 
@@ -70,7 +70,7 @@ class OddsClient:
         return pd.DataFrame(rows)
 
     def player_props(self, league: str, event_id: str) -> pd.DataFrame:
-        markets = ",".join(m["odds_key"] for m in MARKETS.values())
+        markets = ",".join(m["odds_key"] for m in markets_for(league).values())
         data = self._get(f"/sports/{SPORT_KEYS[league]}/events/{event_id}/odds", markets=markets)
         rows = []
         for bk in data.get("bookmakers", []):

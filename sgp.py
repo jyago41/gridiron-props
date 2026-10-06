@@ -14,17 +14,22 @@ import numpy as np
 import pandas as pd
 from scipy.stats import norm
 
-from config import MARKETS
+from config import MARKETS, markets_for
 from model import eligible_mask
 from odds import decimal_to_american
 
 SHRINK = 150  # pairs needed before we trust a correlation halfway (shrinks noisy ones toward 0)
 
 
-def correlation_table(feat: pd.DataFrame) -> dict:
-    """{(relation, 'mkt|POS', 'mkt|POS'): rho} learned from historical box scores."""
+def correlation_table(feat: pd.DataFrame, max_games: int = 1500) -> dict:
+    """{(relation, 'mkt|POS', 'mkt|POS'): rho} learned from historical box scores.
+    Uses the most recent `max_games` games so memory stays small on free hosting."""
+    league = feat["league"].iloc[0]
+    recent = feat.drop_duplicates("game_id").sort_values("game_order").tail(max_games)["game_id"] \
+        if "game_order" in feat else feat["game_id"].unique()
+    feat = feat[feat["game_id"].isin(set(recent))]
     longs = []
-    for mkt, m in MARKETS.items():
+    for mkt, m in markets_for(league).items():
         d = feat[eligible_mask(feat, mkt) & feat[m["stat"]].notna() & feat[f"{m['stat']}_r5"].notna()]
         longs.append(pd.DataFrame({
             "game_id": d["game_id"].values, "player_id": d["player_id"].values, "team": d["team"].values,
@@ -40,20 +45,32 @@ def correlation_table(feat: pd.DataFrame) -> dict:
                       "t": pd.factorize(L["team"])[0].astype("int32"),
                       "k": pd.Categorical(L["key"], categories=keys).codes.astype("int16"),
                       "z": L["z"].values})
-    P = L.merge(L, on="g", suffixes=("_a", "_b"))
-    del L
-    P = P[(P.k_a < P.k_b) | ((P.k_a == P.k_b) & (P.p_a < P.p_b))]  # each unordered pair once
-    rel = np.where(P.p_a.values == P.p_b.values, 0, np.where(P.t_a.values == P.t_b.values, 1, 2)).astype("int8")
-    P = pd.DataFrame({"rel": rel, "k1": P.k_a.values, "k2": P.k_b.values, "za": P.z_a.values, "zb": P.z_b.values})
+    # process games in small batches, keeping only running sums, so memory stays flat
+    games = np.unique(L["g"].values)
+    sums = None
+    for chunk in np.array_split(games, max(1, len(games) // 150)):
+        Lc = L[L["g"].isin(chunk)]
+        P = Lc.merge(Lc, on="g", suffixes=("_a", "_b"))
+        P = P[(P.k_a < P.k_b) | ((P.k_a == P.k_b) & (P.p_a < P.p_b))]  # each unordered pair once
+        rel = np.where(P.p_a.values == P.p_b.values, 0, np.where(P.t_a.values == P.t_b.values, 1, 2)).astype("int8")
+        za, zb = P.z_a.values.astype("float64"), P.z_b.values.astype("float64")
+        agg = pd.DataFrame({"rel": rel, "k1": P.k_a.values, "k2": P.k_b.values, "n": 1.0,
+                            "a": za, "b": zb, "aa": za * za, "bb": zb * zb, "ab": za * zb}
+                           ).groupby(["rel", "k1", "k2"]).sum()
+        sums = agg if sums is None else sums.add(agg, fill_value=0)
+        del P, agg
     names = {0: "same_player", 1: "teammate", 2: "opponent"}
     table = {}
-    for (r, k1, k2), g in P.groupby(["rel", "k1", "k2"]):
-        if len(g) < 15:
+    for (r, k1, k2), x in sums.iterrows():
+        n = x["n"]
+        if n < 15:
             continue
-        rho = float(np.corrcoef(g.za, g.zb)[0, 1])
-        if np.isnan(rho):
+        cov = x["ab"] / n - (x["a"] / n) * (x["b"] / n)
+        va, vb = x["aa"] / n - (x["a"] / n) ** 2, x["bb"] / n - (x["b"] / n) ** 2
+        if va <= 0 or vb <= 0:
             continue
-        table[(names[r], keys[k1], keys[k2])] = rho * len(g) / (len(g) + SHRINK)
+        rho = cov / np.sqrt(va * vb)
+        table[(names[r], keys[k1], keys[k2])] = float(rho * n / (n + SHRINK))
     return table
 
 

@@ -8,7 +8,7 @@ from config import MARKETS
 
 DRIVE = "/content/drive/MyDrive/gridiron_picks"
 LOG_PATH = os.path.join(DRIVE, "picks.csv") if os.path.isdir("/content/drive/MyDrive") else "picks.csv"
-COLS = ["logged_at", "kind", "parlay_id", "league", "season", "week", "game", "player", "player_id",
+COLS = ["logged_at", "kind", "parlay_id", "league", "season", "week", "game_ref", "game", "player", "player_id",
         "market", "side", "line", "decimal", "book", "p_final", "actual", "result"]
 
 
@@ -33,7 +33,9 @@ def save_picks(singles: pd.DataFrame, parlays: list[dict], path=LOG_PATH) -> int
 def load_log(path=LOG_PATH) -> pd.DataFrame:
     if not os.path.exists(path):
         return pd.DataFrame(columns=COLS)
-    log = pd.read_csv(path, dtype={"result": object, "player_id": str, "parlay_id": str})
+    log = pd.read_csv(path, dtype={"result": object, "player_id": str, "parlay_id": str, "game_ref": str})
+    if "game_ref" not in log:
+        log["game_ref"] = None
     log["actual"] = log["actual"].astype(float)
     return log
 
@@ -61,6 +63,27 @@ def grade_log(path=LOG_PATH) -> tuple[pd.DataFrame, dict]:
             log.at[i, "actual"] = actual
             log.at[i, "result"] = "push" if actual == line else (
                 "win" if (actual > line) == (side == "Over") else "loss")
+        log.to_csv(path, index=False)
+
+    todo = log["result"].isna() & (log["league"] == "MLB") & log["game_ref"].notna()
+    if todo.any():
+        from data_mlb import fetch_box, parse_box, schedule
+        pks = sorted(log.loc[todo, "game_ref"].astype(str).unique())
+        final = schedule(None, None, game_pks=pks)
+        final = final[final.state == "Final"]
+        for g in final.itertuples():
+            box = {r["player_id"]: r for r in parse_box(fetch_box(g.game_pk), g.game_pk, g.game_date, g.game_number, g.game_type)}
+            for i in log.index[todo & (log["game_ref"].astype(str) == str(g.game_pk))]:
+                r = box.get(str(log.at[i, "player_id"]))
+                stat = MARKETS[log.at[i, "market"]]["stat"]
+                # a batter who didn't play (or a scratched pitcher) is a void bet at most books
+                if r is None or pd.isna(r.get(stat)):
+                    log.at[i, "result"] = "void"
+                    continue
+                actual, line, side = float(r[stat]), float(log.at[i, "line"]), log.at[i, "side"]
+                log.at[i, "actual"] = actual
+                log.at[i, "result"] = "push" if actual == line else (
+                    "win" if (actual > line) == (side == "Over") else "loss")
         log.to_csv(path, index=False)
 
     done = log[log["result"].notna()]

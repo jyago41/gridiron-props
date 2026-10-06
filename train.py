@@ -9,12 +9,12 @@ import pandas as pd
 
 from config import MARKETS
 from parlay import build_parlays
-from pipeline import get_models, live_slate, load_history, seasons_back
+from pipeline import get_models, live_slate, load_history, seasons_back, seasons_for
 
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--league", nargs="+", default=["nfl"], choices=["nfl", "cfb"])
+    ap.add_argument("--league", nargs="+", default=["nfl"], choices=["nfl", "cfb", "mlb"])
     ap.add_argument("--seasons", type=int, default=4)
     ap.add_argument("--retrain", action="store_true")
     ap.add_argument("--parlays", action="store_true")
@@ -30,7 +30,8 @@ def main():
 
     all_legs = []
     for lg in a.league:
-        hist = load_history(lg, seasons_back(a.seasons), os.getenv("CFBD_API_KEY"))
+        seasons = seasons_for(lg) if lg == "mlb" else seasons_back(a.seasons)
+        hist = load_history(lg, seasons, os.getenv("CFBD_API_KEY"))
         models = get_models(lg, hist, retrain=a.retrain or not a.parlays)
         print(f"\n== {lg.upper()} walk-forward validation ==")
         print(pd.DataFrame({k: m.metrics for k, m in models.items()}).T.round(3).to_string())

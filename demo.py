@@ -4,7 +4,7 @@ from datetime import datetime, timedelta, timezone
 import numpy as np
 import pandas as pd
 
-from config import MARKETS
+from config import markets_for
 from slate import NFL_TEAMS
 
 ABBR_TO_NAME = {v: k for k, v in NFL_TEAMS.items()}
@@ -42,7 +42,7 @@ def mock_slate(history: pd.DataFrame, n_games=10, seed=7):
         played = recent.groupby(["team", "player_name"]).week.nunique().reset_index(name="n")
         played = played[played.n >= 0.6 * played.team.map(team_games)]
         recent = recent[recent.player_name.isin(active) & recent.player_name.isin(played.player_name)]
-        for market, m in MARKETS.items():
+        for market, m in markets_for("nfl").items():
             avg = recent[recent.pos_group.isin(m["positions"])].groupby("player_name")[m["stat"]].mean()
             top = avg.sort_values(ascending=False).head(2 if m["positions"] == ["QB"] else 4)
             for player, mu in top.items():
