@@ -69,8 +69,10 @@ class OddsClient:
             rows.append(row)
         return pd.DataFrame(rows)
 
-    def player_props(self, league: str, event_id: str) -> pd.DataFrame:
-        markets = ",".join(m["odds_key"] for m in markets_for(league).values())
+    def player_props(self, league: str, event_id: str, markets: list[str] | None = None) -> pd.DataFrame:
+        """markets: our market keys to pull (default: all for the league). Each costs ~1 credit."""
+        chosen = markets or list(markets_for(league))
+        markets = ",".join(MARKETS[m]["odds_key"] for m in chosen)
         data = self._get(f"/sports/{SPORT_KEYS[league]}/events/{event_id}/odds", markets=markets)
         rows = []
         for bk in data.get("bookmakers", []):

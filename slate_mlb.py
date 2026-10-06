@@ -29,7 +29,23 @@ def match_schedule(games: pd.DataFrame, sched: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(out)
 
 
-def build_slate_mlb(history, games, props, models, model_weight=0.5, sched=None) -> pd.DataFrame:
+def lineup_status(player_id: str, side: str, lu: dict, probable) -> str:
+    """Batters: their posted lineup spot. Pitchers: whether they're the listed starter."""
+    pid = int(player_id[1:])
+    if player_id.startswith("P"):
+        if pd.isna(probable):
+            return "Starter not announced"
+        return "Probable starter" if int(probable) == pid else "Not the listed starter"
+    order = lu.get(side, [])
+    if not order:
+        return "Lineup not posted yet"
+    return f"Batting {order.index(pid) + 1}" if pid in order else "Not in lineup"
+
+
+BLOCKED = {"Not in lineup", "Not the listed starter"}
+
+
+def build_slate_mlb(history, games, props, models, model_weight=0.5, sched=None, get_lineups=None) -> pd.DataFrame:
     if sched is None:
         from data_mlb import schedule
         d = pd.to_datetime(games["commence_time"]).dt.tz_convert("America/New_York").dt.date
@@ -37,6 +53,10 @@ def build_slate_mlb(history, games, props, models, model_weight=0.5, sched=None)
     ev = match_schedule(games, sched)
     if ev.empty:
         return pd.DataFrame()
+    if get_lineups is None:
+        from data_mlb import lineups as get_lineups
+    posted = {str(g.game_pk): get_lineups(g.game_pk) for g in ev.itertuples()}
+    side_pp = {str(g.game_pk): {"home": g.home_pp, "away": g.away_pp, "home_team": g.home} for g in ev.itertuples()}
 
     latest = history.sort_values("game_order").drop_duplicates("player_id", keep="last")
     latest = latest.assign(key=latest["player_name"].map(norm_name))
@@ -93,6 +113,9 @@ def build_slate_mlb(history, games, props, models, model_weight=0.5, sched=None)
         pred = float(m.predict(x)[0])
         p_model = float(m.prob_over(pred, r.line)[0])
         p_over = model_weight * p_model + (1 - model_weight) * r.p_market_over
+        info = side_pp[r.game_ref]
+        side_ = "home" if x["team"].iloc[0] == info["home_team"] else "away"
+        lu = lineup_status(r.player_id, side_, posted[r.game_ref], info[side_])
         for side, p, dec, book, pm in (("Over", p_over, r.over_dec, r.over_book, p_model),
                                        ("Under", 1 - p_over, r.under_dec, r.under_book, 1 - p_model)):
             rows.append({"league": "MLB", "event_id": r.event_id, "player_id": r.player_id, "season": r.season,
@@ -101,7 +124,7 @@ def build_slate_mlb(history, games, props, models, model_weight=0.5, sched=None)
                          "market": r.market, "market_label": MARKETS[r.market]["label"], "side": side,
                          "line": r.line, "projection": round(pred, 2), "p_model": pm,
                          "p_market": r.p_market_over if side == "Over" else 1 - r.p_market_over,
-                         "p_final": p, "decimal": dec, "book": book, "ev": p * dec - 1})
+                         "p_final": p, "decimal": dec, "book": book, "ev": p * dec - 1, "lineup": lu})
     out = pd.DataFrame(rows)
     if out.empty:
         return out

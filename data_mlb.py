@@ -14,6 +14,7 @@ from config import current_mlb_season
 
 BASE = "https://statsapi.mlb.com/api/v1"
 GAME_TYPES = "R,F,D,L,W"  # regular season + all playoff rounds
+POSTSEASON = {"F", "D", "L", "W"}   # wild card, division series, LCS, World Series
 CACHE_DIR = "cache"
 BOX_FIELDS = ("teams,away,home,team,id,name,players,person,fullName,position,abbreviation,battingOrder,"
               "stats,batting,pitching,plateAppearances,atBats,hits,doubles,triples,homeRuns,runs,rbi,"
@@ -35,7 +36,7 @@ def schedule(start: str, end: str, probables: bool = False, game_pks=None) -> pd
     else:
         params.update(startDate=start, endDate=end)
     if probables:
-        params["hydrate"] = "probablePitcher"
+        params["hydrate"] = "probablePitcher,seriesStatus"
     rows = []
     for d in _get("/schedule", **params).get("dates", []):
         for g in d.get("games", []):
@@ -46,8 +47,33 @@ def schedule(start: str, end: str, probables: bool = False, game_pks=None) -> pd
                 "game_type": g.get("gameType", "R"),
                 "home_team": h["team"]["name"], "away_team": a["team"]["name"],
                 "home_pp": h.get("probablePitcher", {}).get("id"), "away_pp": a.get("probablePitcher", {}).get("id"),
+                "home_pp_name": h.get("probablePitcher", {}).get("fullName"),
+                "away_pp_name": a.get("probablePitcher", {}).get("fullName"),
+                "series": _series_label(g),
             })
     return pd.DataFrame(rows)
+
+
+def _series_label(g) -> str:
+    """e.g. 'Division Series, Game 3 · LAD leads 2-0' (blank in the regular season)."""
+    if g.get("gameType", "R") not in POSTSEASON:
+        return ""
+    parts = [g.get("seriesDescription", "")]
+    if g.get("seriesGameNumber"):
+        parts[0] += f", Game {g['seriesGameNumber']}"
+    status = g.get("seriesStatus", {}) or {}
+    if status.get("result"):
+        parts.append(status["result"])
+    return " · ".join(p for p in parts if p)
+
+
+def lineups(game_pk) -> dict:
+    """Posted batting orders: {'home': [player ids], 'away': [...]}; empty lists until posted."""
+    try:
+        box = fetch_box(game_pk)
+        return {s: [int(x) for x in box["teams"][s].get("battingOrder", [])] for s in ("home", "away")}
+    except Exception:
+        return {"home": [], "away": []}
 
 
 def _f(x):
@@ -70,9 +96,6 @@ def fetch_box(game_pk):
     if not box.get("teams", {}).get("home", {}).get("players"):   # field filter failed: get it all
         box = _get(f"/game/{game_pk}/boxscore")
     return box
-
-
-POSTSEASON = {"F", "D", "L", "W"}   # wild card, division series, LCS, World Series
 
 
 def parse_box(box: dict, game_pk, game_date: str, game_number: int = 1, game_type: str = "R") -> list[dict]:

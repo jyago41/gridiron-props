@@ -66,14 +66,14 @@ def live_games(league, odds_key, days_ahead=7):
     return OddsClient(odds_key).game_lines(league, days_ahead)
 
 
-def live_props(league, odds_key, event_ids, log=print):
+def live_props(league, odds_key, event_ids, log=print, markets=None):
     """Fetch + consolidate props for just the chosen games (each game costs ~5 credits)."""
     from odds import OddsClient, consolidate_props
     client = OddsClient(odds_key)
     raw = []
     for eid in event_ids:
         try:
-            raw.append(client.player_props(league, eid))
+            raw.append(client.player_props(league, eid, markets))
         except Exception as e:
             log(f"Skipped one game ({e})")
     raw = [r for r in raw if not r.empty]
