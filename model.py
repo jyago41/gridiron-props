@@ -111,6 +111,13 @@ class PropModel:
             out[i] = 1.0 - np.searchsorted(r, ln - pr, side="right") / len(r)
         return np.clip(out, 0.01, 0.99)
 
+    def quantiles(self, pred, qs=(0.25, 0.75)) -> np.ndarray:
+        """Likely range: the qs quantiles of outcomes for this projection (rows x len(qs))."""
+        pred = np.atleast_1d(pred).astype(float)
+        bins = np.digitize(pred, self.bin_edges)
+        out = np.array([[np.quantile(self.bin_resid[b], q) + p for q in qs] for p, b in zip(pred, bins)])
+        return np.clip(out, 0, None)
+
     # ---------- persistence ----------
     def path(self):
         return os.path.join(MODEL_DIR, f"{self.league}_{self.market}.joblib")

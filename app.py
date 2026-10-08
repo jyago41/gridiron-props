@@ -10,7 +10,7 @@ from parlay import build_parlays
 from picklog import LOG_PATH, capture_closing, grade_log, load_log, save_picks
 from pipeline import get_models, live_games, live_props, load_history, seasons_for
 from sgp import american_to_dec, build_sgps, correlation_table
-from slate import UNAVAILABLE, build_slate
+from slate import UNAVAILABLE, build_slate, project_players
 
 st.set_page_config(page_title="Gridiron Props", page_icon="🏈", layout="wide")
 st.markdown("""
@@ -257,6 +257,66 @@ def record_section(ns, league_names):
         st.success("Restored. Tap Update results.")
 
 
+PROJ_COLS = {  # market -> (column title, view, decimals)
+    "pass_yds": ("Pass yds", "Passing", 0), "pass_cmp": ("Completions", "Passing", 1),
+    "rush_yds": ("Rush yds", "Rushing", 0), "rec_yds": ("Rec yds", "Receiving", 0),
+    "receptions": ("Receptions", "Receiving", 1)}
+
+
+def projections_table(pr: pd.DataFrame):
+    c1, c2, c3 = st.columns(3)
+    view = c1.radio("Stats", ["All", "Receiving", "Rushing", "Passing"], horizontal=True, key="proj_view")
+    team = c2.selectbox("Team", ["All teams"] + sorted(pr["team"].unique()), key="proj_team")
+    pos = c3.multiselect("Positions", ["QB", "RB", "WR", "TE"], default=["QB", "RB", "WR", "TE"], key="proj_pos")
+    ranges = st.toggle("Show likely range (middle 50% of outcomes)", value=True, key="proj_ranges")
+    d = pr[pr.pos_group.isin(pos)]
+    if team != "All teams":
+        d = d[d.team == team]
+    mks = [m for m, (_, v, _) in PROJ_COLS.items() if view in ("All", v)]
+    d = d[d[mks].notna().any(axis=1)]
+    if view != "All":                     # biggest projections first for the chosen stat
+        d = d.sort_values(mks[0], ascending=False)
+
+    # sportsbook main lines, if picks have been pulled for these games
+    legs = st.session_state.get("fb_legs")
+    lines = {}
+    if legs is not None and not legs.empty:
+        main = legs[~legs.get("alt", False)] if "alt" in legs else legs
+        lines = {(r.player, r.market): r.line for r in main.drop_duplicates(["player", "market"]).itertuples()}
+
+    rows = []
+    for r in d.itertuples():
+        row = {"Player": r.player_name, "Team": r.team, "Pos": r.pos_group}
+        if r.status and r.status != "Active":
+            row["Status"] = r.status
+        for mk in mks:
+            title, _, dec = PROJ_COLS[mk]
+            v = getattr(r, mk)
+            if pd.isna(v):
+                row[title] = ""
+                continue
+            txt = f"{v:.{dec}f}"
+            if ranges:
+                txt += f"  ({getattr(r, mk + '_lo'):.{dec}f}–{getattr(r, mk + '_hi'):.{dec}f})"
+            row[title] = txt
+            if lines:
+                ln = lines.get((r.player_name, mk))
+                row[f"{title} line"] = "" if ln is None else f"{ln:g}"
+        row["Game"] = r.game
+        rows.append(row)
+    out = pd.DataFrame(rows)
+    if "Status" in out:
+        out["Status"] = out["Status"].fillna("")
+        out = out[["Player", "Team", "Pos", "Status"] + [c for c in out.columns if c not in ("Player", "Team", "Pos", "Status")]]
+    st.dataframe(out, hide_index=True, width="stretch", height=min(38 * (len(out) + 1), 640))
+    st.caption("Projection = the model's expected stat line. Likely range = the middle half of outcomes "
+               "(a 25% chance of finishing below it and 25% above). " +
+               ("Line = your sportsbook's main line, from your last Get picks." if lines else
+                "Tap Get picks below to see your sportsbook's lines next to these."))
+    st.download_button("Download projections (CSV)", d.to_csv(index=False), "projections.csv", "text/csv",
+                       key="proj_dl")
+
+
 def pitching_matchups(games_sel, hist):
     st.write("Each starter's last five starts. Short rest or short recent outings usually mean fewer outs "
              "and strikeouts, especially in the playoffs when managers go to the bullpen early.")
@@ -404,6 +464,29 @@ def sport_page(ns: str):
         st.caption("Best price across sportsbooks, with the book in parentheses. Win chance is the sportsbooks' "
                    "own estimate with their cut removed. These are market odds, not model picks.")
 
+    # ---------- player projections (football; free) ----------
+    if not mlb:
+        with st.expander("Player projections for every offensive player (free, no credits)"):
+            if st.button("Show projections for these games", key="fb_proj_go", width="stretch"):
+                frames = []
+                for lg, g in sel.groupby("league"):
+                    with st.spinner(f"Projecting every {lg.upper()} player…"):
+                        try:
+                            frames.append(project_players(cached_history(lg, CFBD_KEY), g,
+                                                          cached_models(lg, CFBD_KEY), lg))
+                        except Exception as e:
+                            st.error(f"{lg.upper()}: {e}")
+                frames = [f for f in frames if not f.empty]
+                st.session_state["fb_proj"] = (tuple(chosen), pd.concat(frames) if frames else pd.DataFrame())
+            saved = st.session_state.get("fb_proj")
+            if saved and saved[0] == tuple(chosen):
+                if saved[1].empty:
+                    st.info("No players found for these games.")
+                else:
+                    projections_table(saved[1])
+            elif saved:
+                st.caption("Games changed: tap the button to update.")
+
     # ---------- 3. picks ----------
     st.markdown("<div class='step'>3. Get picks</div>", unsafe_allow_html=True)
     if live:
@@ -431,6 +514,8 @@ def sport_page(ns: str):
         st.session_state[f"{ns}_legs"] = legs
         st.session_state[f"{ns}_n_games"] = len(sel)
         st.session_state[f"{ns}_sel"] = sel
+        if not mlb and st.session_state.get("fb_proj") and not legs.empty:
+            st.rerun()      # redraw so the projections table above shows the new sportsbook lines
 
     legs = st.session_state.get(f"{ns}_legs")
     if legs is None:

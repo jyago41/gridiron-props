@@ -122,10 +122,88 @@ def build_slate(history: pd.DataFrame, games: pd.DataFrame, props: pd.DataFrame,
                          "projection": round(pred, 1), "p_model": pm,
                          "p_market": r.p_market_over if side == "Over" else 1 - r.p_market_over,
                          "p_final": p, "decimal": dec, "book": book, "ev": p * dec - 1,
-                         "status": status.get(r.player_id, "Active") if league == "nfl" else ""})
+                         "status": status.get(r.player_id, "Active") if league == "nfl" else "",
+                         "alt": bool(getattr(r, "alt", False))})
     out = pd.DataFrame(rows)
     # Sharp books rarely miss by 25+ points of probability. When the model disagrees that much,
     # it's usually missing news (injury, benching, role change). Flag it; parlays skip these.
     out["disagreement"] = (out["p_model"] - out["p_market"]).abs()
     # keep only the better side of each prop
     return out.sort_values("ev", ascending=False).reset_index(drop=True)
+
+
+PROJ_MARKETS = ["pass_yds", "pass_cmp", "rush_yds", "rec_yds", "receptions"]
+
+
+def project_players(history: pd.DataFrame, games: pd.DataFrame, models: dict, league: str,
+                    qs=(0.25, 0.75)) -> pd.DataFrame:
+    """Projections for every offensive regular in the given games (no sportsbook data needed).
+    Regulars: QB/RB/WR/TE who played for the team in one of its last 3 games and had real usage;
+    players listed Out / Doubtful / IR are left off."""
+    known = set(history["team"].unique())
+    games = games.assign(home=games["home_team"].map(lambda t: resolve_team(t, league, known)),
+                         away=games["away_team"].map(lambda t: resolve_team(t, league, known))).dropna(subset=["home", "away"])
+    if games.empty:
+        return pd.DataFrame()
+    season, next_week = next_game_week(history, games)
+    status, absences = {}, None
+    if league == "nfl":
+        try:
+            from data_nfl import load_availability
+            avail = load_availability(season, next_week)
+            status = dict(zip(avail.player_id, avail.status))
+            absences = (avail[avail.status.isin(UNAVAILABLE)].assign(game_order=season * 100 + next_week)
+                        [["player_id", "team", "game_order"]])
+        except Exception as e:
+            print(f"[nfl] availability skipped: {e}")
+
+    h = history.assign(game_order=history["season"] * 100 + history["week"])
+    current_team = h.sort_values("game_order").drop_duplicates("player_id", keep="last").set_index("player_id")["team"]
+    future, meta = [], {}
+    for ev in games.itertuples():
+        for team, opp, home in ((ev.home, ev.away, 1), (ev.away, ev.home, 0)):
+            t = h[h.team == team]
+            last3 = sorted(t["game_order"].unique())[-3:]
+            r = t[t.game_order.isin(last3)]
+            use = r.groupby("player_id").agg(targets=("targets", "mean"), carries=("carries", "mean"),
+                                             attempts=("attempts", "mean"))
+            latest = r.sort_values("game_order").drop_duplicates("player_id", keep="last").set_index("player_id")
+            for pid, u in use.iterrows():
+                p = latest.loc[pid]
+                if current_team.get(pid) != team or status.get(pid) in UNAVAILABLE:
+                    continue
+                if p["pos_group"] == "QB" and not (u.attempts >= 10):
+                    continue
+                if p["pos_group"] != "QB" and not (u.targets >= 1 or u.carries >= 2):
+                    continue
+                spread = ev.home_spread if home else -ev.home_spread
+                future.append({"league": league, "player_id": pid, "player_name": p["player_name"],
+                               "position": p["position"], "pos_group": p["pos_group"], "team": team,
+                               "opponent": opp, "season": season, "week": next_week, "game_id": ev.event_id,
+                               "is_home": home, "team_spread": spread, "game_total": ev.game_total})
+                meta[pid] = f"{ev.away_team} @ {ev.home_team}"
+    if not future:
+        return pd.DataFrame()
+    fut = pd.DataFrame(future).drop_duplicates("player_id")
+    feat, _ = build_features(pd.concat([history, fut], ignore_index=True), absences=absences)
+    ff = feat[(feat.season == season) & (feat.week == next_week) & feat.player_id.isin(fut.player_id)]
+    ff = ff.drop_duplicates("player_id").reset_index(drop=True)
+
+    out = ff[["player_id", "player_name", "team", "opponent", "pos_group"]].copy()
+    out["game"] = out.player_id.map(meta)
+    out["status"] = out.player_id.map(lambda p: status.get(p, "Active")) if league == "nfl" else ""
+    for mk in PROJ_MARKETS:
+        m = models.get(mk)
+        if m is None:
+            continue
+        pred = m.predict(ff)
+        lo_hi = m.quantiles(pred, qs)
+        show = ff["pos_group"].isin(MARKETS[mk]["positions"]).to_numpy().copy()
+        if mk == "rush_yds":       # receivers only if they actually get carries
+            show &= ~(ff["pos_group"].isin(["WR", "TE"]) & (ff["carries_r5"].fillna(0) < 1)).values
+        out[mk] = np.where(show, pred, np.nan)
+        out[f"{mk}_lo"] = np.where(show, lo_hi[:, 0], np.nan)
+        out[f"{mk}_hi"] = np.where(show, lo_hi[:, 1], np.nan)
+    order = {"QB": 0, "RB": 1, "WR": 2, "TE": 3}
+    return out.assign(_o=out.pos_group.map(order)).sort_values(["game", "team", "_o", "rec_yds", "rush_yds"],
+                                                                ascending=[True, True, True, False, False]).drop(columns="_o")
