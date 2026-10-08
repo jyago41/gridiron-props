@@ -19,7 +19,7 @@ CACHE_DIR = "cache"
 BOX_FIELDS = ("teams,away,home,team,id,name,players,person,fullName,position,abbreviation,battingOrder,"
               "stats,batting,pitching,plateAppearances,atBats,hits,doubles,triples,homeRuns,runs,rbi,"
               "baseOnBalls,strikeOuts,stolenBases,totalBases,outs,inningsPitched,earnedRuns,battersFaced,"
-              "numberOfPitches,pitchesThrown,batters,pitchers")
+              "numberOfPitches,pitchesThrown,batters,pitchers,officials,official,officialType")
 _session = requests.Session()
 
 
@@ -36,7 +36,7 @@ def schedule(start: str, end: str, probables: bool = False, game_pks=None) -> pd
     else:
         params.update(startDate=start, endDate=end)
     if probables:
-        params["hydrate"] = "probablePitcher,seriesStatus"
+        params["hydrate"] = "probablePitcher,seriesStatus,officials"
     rows = []
     for d in _get("/schedule", **params).get("dates", []):
         for g in d.get("games", []):
@@ -49,9 +49,33 @@ def schedule(start: str, end: str, probables: bool = False, game_pks=None) -> pd
                 "home_pp": h.get("probablePitcher", {}).get("id"), "away_pp": a.get("probablePitcher", {}).get("id"),
                 "home_pp_name": h.get("probablePitcher", {}).get("fullName"),
                 "away_pp_name": a.get("probablePitcher", {}).get("fullName"),
-                "series": _series_label(g),
+                "series": _series_label(g), "hp_ump": _hp_ump(g.get("officials")),
             })
     return pd.DataFrame(rows)
+
+
+def _hp_ump(officials):
+    for o in officials or []:
+        if o.get("officialType") == "Home Plate":
+            return o.get("official", {}).get("id")
+    return None
+
+
+def handedness(ids, cache_path=os.path.join(CACHE_DIR, "mlb_hands.pkl")) -> dict:
+    """{player id: (bats, throws)}, e.g. (L, R). Fetched 150 players per call and cached."""
+    os.makedirs(CACHE_DIR, exist_ok=True)
+    known = pd.read_pickle(cache_path) if os.path.exists(cache_path) else {}
+    todo = [i for i in {int(x) for x in ids} if i not in known]
+    for s in range(0, len(todo), 150):
+        try:
+            data = _get("/people", personIds=",".join(map(str, todo[s:s + 150])),
+                        fields="people,id,batSide,pitchHand,code")
+            for p in data.get("people", []):
+                known[p["id"]] = (p.get("batSide", {}).get("code"), p.get("pitchHand", {}).get("code"))
+        except Exception:
+            pass
+    pd.to_pickle(known, cache_path)
+    return known
 
 
 def _series_label(g) -> str:
@@ -108,7 +132,8 @@ def parse_box(box: dict, game_pk, game_date: str, game_number: int = 1, game_typ
         team, opp = t["team"]["name"], teams[other]["team"]["name"]
         base = {"league": "mlb", "team": team, "opponent": opp, "season": season, "week": 0,
                 "game_id": str(game_pk), "game_order": order, "game_date": game_date,
-                "is_home": int(side == "home"), "postseason": int(game_type in POSTSEASON)}
+                "is_home": int(side == "home"), "postseason": int(game_type in POSTSEASON),
+                "hp_ump": _hp_ump(box.get("officials"))}
         players = t.get("players", {})
         for pid in t.get("batters", []):
             p = players.get(f"ID{pid}", {})
@@ -146,7 +171,7 @@ def parse_box(box: dict, game_pk, game_date: str, game_number: int = 1, game_typ
 
 def load_mlb_season(season: int, workers: int = 16, log=print) -> pd.DataFrame:
     os.makedirs(CACHE_DIR, exist_ok=True)
-    path = os.path.join(CACHE_DIR, f"mlb_v2_{season}.pkl")
+    path = os.path.join(CACHE_DIR, f"mlb_v3_{season}.pkl")
     cached = pd.read_pickle(path) if os.path.exists(path) else pd.DataFrame()
     if not cached.empty and season < current_mlb_season():
         return cached
@@ -171,7 +196,16 @@ def load_mlb_season(season: int, workers: int = 16, log=print) -> pd.DataFrame:
     return cached
 
 
+def add_handedness(df: pd.DataFrame) -> pd.DataFrame:
+    hands = handedness(df["player_id"].str[1:].astype(int).unique())
+    pid = df["player_id"].str[1:].astype(int)
+    df["bat_side"] = pid.map(lambda i: hands.get(i, (None, None))[0])
+    df["pitch_hand"] = pid.map(lambda i: hands.get(i, (None, None))[1])
+    return df
+
+
 def load_mlb(seasons: list[int], log=print) -> pd.DataFrame:
     frames = [load_mlb_season(s, log=log) for s in seasons]
     df = pd.concat([f for f in frames if not f.empty], ignore_index=True)
+    df = add_handedness(df)
     return df.sort_values(["game_order", "game_id"]).reset_index(drop=True)

@@ -25,6 +25,7 @@ def match_schedule(games: pd.DataFrame, sched: pd.DataFrame) -> pd.DataFrame:
         out.append({**ev._asdict(), "game_pk": g.game_pk, "game_date": g.game_date,
                     "postseason": int(g.get("game_type", "R") in {"F", "D", "L", "W"}),
                     "game_number": g.game_number, "home_pp": g.home_pp, "away_pp": g.away_pp,
+                    "hp_ump": g.get("hp_ump"),
                     "home": g.home_team, "away": g.away_team})
     return pd.DataFrame(out)
 
@@ -64,13 +65,15 @@ def build_slate_mlb(history, games, props, models, model_weight=0.5, sched=None,
     for g in ev.itertuples():
         order = int(str(g.game_date).replace("-", "")) * 10 + int(g.game_number or 1)
         base = {"league": "mlb", "season": int(str(g.game_date)[:4]), "week": 0, "game_id": str(g.game_pk),
-                "game_order": order, "game_date": str(g.game_date), "postseason": g.postseason}
+                "game_order": order, "game_date": str(g.game_date), "postseason": g.postseason,
+                "hp_ump": g.hp_ump}
         for team, opp, home in ((g.home, g.away, 1), (g.away, g.home, 0)):
             extra.append({"team": team, "opponent": opp, "game_id": str(g.game_pk), "game_order": order, "is_home": home})
 
         def add(row, team):
             opp = g.away if team == g.home else g.home
-            future.append({**{c: row[c] for c in ["player_id", "player_name", "position", "pos_group"]},
+            future.append({**{c: row.get(c) for c in ["player_id", "player_name", "position", "pos_group",
+                                                       "bat_side", "pitch_hand"]},
                            **base, "team": team, "opponent": opp, "is_home": int(team == g.home)})
 
         # probable starters (even without props) so batters see who they're facing

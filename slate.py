@@ -19,6 +19,10 @@ NFL_TEAMS = {
 }
 
 
+# statuses that mean a player won't play (their props are usually voided)
+UNAVAILABLE = {"Out", "Doubtful", "Injured reserve", "Inactive", "Released", "Retired", "Exempt"}
+
+
 def norm_name(s: str) -> str:
     s = unicodedata.normalize("NFKD", str(s)).encode("ascii", "ignore").decode()   # José -> Jose
     s = re.sub(r"[^a-z ]", "", s.lower().replace("-", " "))
@@ -82,7 +86,18 @@ def build_slate(history: pd.DataFrame, games: pd.DataFrame, props: pd.DataFrame,
         return pd.DataFrame()
 
     fut = pd.DataFrame(future).drop_duplicates("player_id")
-    feat, _ = build_features(pd.concat([history, fut], ignore_index=True))
+    # this week's injury report + IR/inactive lists: who's out, and whose opportunity is up for grabs
+    status, absences = {}, None
+    if league == "nfl":
+        try:
+            from data_nfl import load_availability
+            avail = load_availability(season, next_week)
+            status = dict(zip(avail.player_id, avail.status))
+            away = avail[avail.status.isin(UNAVAILABLE)]
+            absences = away.assign(game_order=season * 100 + next_week)[["player_id", "team", "game_order"]]
+        except Exception as e:
+            print(f"[nfl] availability skipped: {e}")
+    feat, _ = build_features(pd.concat([history, fut], ignore_index=True), absences=absences)
     fut_feat = feat[(feat.season == season) & (feat.week == next_week) & feat.player_id.isin(fut.player_id)]
     fut_feat = fut_feat.drop_duplicates("player_id").set_index("player_id")
 
@@ -106,7 +121,8 @@ def build_slate(history: pd.DataFrame, games: pd.DataFrame, props: pd.DataFrame,
                          "market_label": MARKETS[r.market]["label"], "side": side, "line": r.line,
                          "projection": round(pred, 1), "p_model": pm,
                          "p_market": r.p_market_over if side == "Over" else 1 - r.p_market_over,
-                         "p_final": p, "decimal": dec, "book": book, "ev": p * dec - 1})
+                         "p_final": p, "decimal": dec, "book": book, "ev": p * dec - 1,
+                         "status": status.get(r.player_id, "Active") if league == "nfl" else ""})
     out = pd.DataFrame(rows)
     # Sharp books rarely miss by 25+ points of probability. When the model disagrees that much,
     # it's usually missing news (injury, benching, role change). Flag it; parlays skip these.

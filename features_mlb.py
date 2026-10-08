@@ -4,6 +4,8 @@ import pandas as pd
 
 from features import _rolling_prior
 
+PLATOON_K = 60    # plate appearances of "regression to his overall rate" in each platoon split
+UMP_BF = 1500     # batters faced (~20 games) before an umpire's own strikeout rate gets half weight
 B_STATS = ["pa", "hits", "total_bases", "hrr", "hr", "bb", "so", "runs", "rbi", "lineup_spot", "started"]
 P_STATS = ["p_outs", "p_strikeouts", "p_hits", "p_bf", "p_er", "p_bb", "p_pitches"]
 
@@ -29,6 +31,24 @@ def _player_form(d, stats, windows):
 
 def build_features_mlb(df: pd.DataFrame, extra_games: pd.DataFrame | None = None):
     df = df.copy()
+    for c in ("bat_side", "pitch_hand", "hp_ump"):
+        if c not in df:
+            df[c] = np.nan
+
+    # ---- home plate umpire: his games' strikeout rate vs. league, before today (shrunk toward 1.0) ----
+    pg = df[df.pos_group.isin(["SP", "RP"])]
+    games = (df.groupby("game_id", as_index=False).agg(game_order=("game_order", "first"), hp_ump=("hp_ump", "first"))
+               .merge(pg.groupby("game_id", as_index=False).agg(k=("p_strikeouts", lambda s: s.sum(min_count=1)),
+                                                                 bf=("p_bf", lambda s: s.sum(min_count=1))),
+                      on="game_id", how="left").sort_values("game_order").reset_index(drop=True))
+    lg = games["k"].sum() / max(games["bf"].sum(), 1)
+    gu = games.groupby("hp_ump", sort=False)
+    k_prior = gu["k"].cumsum() - games["k"].fillna(0)
+    bf_prior = gu["bf"].cumsum() - games["bf"].fillna(0)
+    games["ump_k_factor"] = ((k_prior + UMP_BF * lg) / (bf_prior + UMP_BF)) / lg
+    games.loc[games["hp_ump"].isna(), "ump_k_factor"] = np.nan
+    df = df.merge(games[["game_id", "ump_k_factor"]], on="game_id", how="left")
+
     B, P = df[df.pos_group == "B"].copy(), df[df.pos_group.isin(["SP", "RP"])].copy()
 
     # ---- batter form: counts plus per-plate-appearance rates over 15 / 40 games ----
@@ -83,19 +103,34 @@ def build_features_mlb(df: pd.DataFrame, extra_games: pd.DataFrame | None = None
     B = B.merge(allowed[["def_team", "game_id", "def_ra_pg"]].rename(columns={"def_team": "opponent"}),
                 on=["opponent", "game_id"], how="left")
     sp = P[P.pos_group == "SP"][["team", "game_id", "p_strikeouts_per_bf10", "p_hits_per_bf10",
-                                  "p_er_per_bf10", "p_bb_per_bf10", "p_outs_r10"]]
-    sp = sp.rename(columns={"team": "opponent", "p_strikeouts_per_bf10": "opp_sp_k_rate",
+                                  "p_er_per_bf10", "p_bb_per_bf10", "p_outs_r10", "pitch_hand"]]
+    sp = sp.rename(columns={"team": "opponent", "pitch_hand": "opp_sp_hand", "p_strikeouts_per_bf10": "opp_sp_k_rate",
                             "p_hits_per_bf10": "opp_sp_hit_rate", "p_er_per_bf10": "opp_sp_er_rate",
                             "p_bb_per_bf10": "opp_sp_bb_rate", "p_outs_r10": "opp_sp_outs"})
     B = B.merge(sp.drop_duplicates(["opponent", "game_id"]), on=["opponent", "game_id"], how="left")
     B = B.merge(park, on="game_id", how="left")
+
+    # ---- platoon: how this batter hits against today's starter's hand (shrunk toward his overall rate) ----
+    B = B.sort_values(["player_id", "game_order"]).reset_index(drop=True)
+    B["platoon_adv"] = np.where(B["bat_side"] == "S", 1.0,
+                                np.where(B["bat_side"].isna() | B["opp_sp_hand"].isna(), np.nan,
+                                         (B["bat_side"] != B["opp_sp_hand"]).astype(float)))
+    gh = B.groupby(["player_id", "opp_sp_hand"], sort=False)
+    prior_pa = gh["pa"].cumsum() - B["pa"].fillna(0)
+    for col in ("hits", "total_bases", "hrr"):
+        prior = gh[col].cumsum() - B[col].fillna(0)
+        base = B[f"{col}_per_pa40"].fillna(B[col].sum() / B["pa"].sum())
+        B[f"{col}_vs_hand"] = (prior + PLATOON_K * base) / (prior_pa + PLATOON_K)
+    B.loc[B["opp_sp_hand"].isna(), ["hits_vs_hand", "total_bases_vs_hand", "hrr_vs_hand"]] = np.nan
+
     b_ctx = team_cols + ["def_ra_pg", "opp_sp_k_rate", "opp_sp_hit_rate", "opp_sp_er_rate",
-                         "opp_sp_bb_rate", "opp_sp_outs", "park_runs", "is_home", "postseason"]
+                         "opp_sp_bb_rate", "opp_sp_outs", "park_runs", "is_home", "postseason",
+                         "platoon_adv", "hits_vs_hand", "total_bases_vs_hand", "hrr_vs_hand", "ump_k_factor"]
 
     # ---- pitchers: opposing lineup's recent strikeout / contact rates, park ----
     opp = T.rename(columns={"team": "opponent", **{c: f"opp_{c}" for c in team_cols}})
     P = P.merge(opp, on=["opponent", "game_id"], how="left").merge(park, on="game_id", how="left")
-    p_ctx = [f"opp_{c}" for c in team_cols] + ["park_runs", "is_home", "postseason"]
+    p_ctx = [f"opp_{c}" for c in team_cols] + ["park_runs", "is_home", "postseason", "ump_k_factor"]
 
     out = pd.concat([B, P], ignore_index=True)
     return out, {"B": bfe + b_ctx, "SP": pfe + ["p_bf_r5"] + p_ctx}

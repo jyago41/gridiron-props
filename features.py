@@ -18,7 +18,57 @@ def _rolling_prior(df, keys, col, w):
             .reset_index(level=list(range(len(keys))), drop=True))
 
 
-def build_features(df: pd.DataFrame, extra_games=None):
+REGULAR = {"targets": 2.0, "carries": 3.0}     # post-game 5-game averages that make a player a "regular"
+
+
+def vacated_opportunity(df: pd.DataFrame, absences: pd.DataFrame | None = None) -> pd.DataFrame:
+    """For each team-game: how many targets / carries per game belong to regulars who are NOT playing.
+    History: a regular who played in one of the team's previous 3 games but has no stats this game.
+    Upcoming games: also anyone listed Out / Doubtful / on IR (absences: player_id, team, game_order)."""
+    tg = df[["team", "game_order", "season"]].drop_duplicates(["team", "game_order"]).sort_values(["team", "game_order"])
+    tg["k"] = tg.groupby("team").cumcount()
+    # upcoming games have no box score yet: there, only the injury report / roster lists say who's out
+    has_box = (df[["targets", "carries", "attempts"]].notna().any(axis=1)
+               .groupby([df["team"], df["game_order"]]).any().rename("has_box").reset_index())
+    tg = tg.merge(has_box, on=["team", "game_order"])
+    tg["has_box"] = tg["has_box"].astype(bool)
+    d = df[["player_id", "team", "game_order", "pos_group", "targets", "carries"]].merge(
+        tg[["team", "game_order", "k", "season"]], on=["team", "game_order"])
+    d = d.sort_values(["player_id", "game_order"])
+    for c in ("targets", "carries"):
+        d[f"{c}_post5"] = (d.groupby("player_id")[c].rolling(5, min_periods=1).mean()
+                           .reset_index(level=0, drop=True))
+    reg = d[(d.targets_post5 >= REGULAR["targets"]) | (d.carries_post5 >= REGULAR["carries"])]
+    usage = ["targets_post5", "carries_post5", "pos_group"]
+    cand = pd.concat([reg.assign(k_t=reg.k + s, gap=s) for s in (1, 2, 3)], ignore_index=True)
+    # only within a season: offseason departures aren't injuries
+    cand = cand.merge(tg[["team", "k", "season"]].rename(columns={"k": "k_t", "season": "season_t"}), on=["team", "k_t"])
+    cand = cand[cand.season_t == cand.season].drop(columns="season_t")
+    cand = cand.merge(tg[["team", "k", "has_box"]].rename(columns={"k": "k_t"}), on=["team", "k_t"])
+    cand = cand[cand.has_box].drop(columns="has_box")
+    cand = cand.sort_values("gap").drop_duplicates(["player_id", "team", "k_t"])
+    if absences is not None and len(absences):
+        # same rule as history: only counts if he played for this team within its last 3 games this season
+        last = (reg.sort_values("game_order").drop_duplicates(["player_id", "team"], keep="last")
+                [["player_id", "team", "k", "season"] + usage].rename(columns={"k": "k_last"}))
+        a = absences.merge(tg[~tg.has_box], on=["team", "game_order"]).rename(columns={"k": "k_t"})
+        a = a.merge(last, on=["player_id", "team", "season"])
+        a = a[(a.k_t - a.k_last).between(1, 3)].drop(columns="k_last")
+        cand = pd.concat([cand, a.assign(gap=0)], ignore_index=True).drop_duplicates(["player_id", "team", "k_t"])
+    played = d[["player_id", "team", "k"]].rename(columns={"k": "k_t"}).assign(played=1)
+    cand = cand.merge(played, on=["player_id", "team", "k_t"], how="left")
+    cand = cand[cand.played.isna()]
+    out = cand.assign(
+        vac_targets=cand.targets_post5, vac_carries=cand.carries_post5,
+        vac_targets_wrte=np.where(cand.pos_group.isin(["WR", "TE"]), cand.targets_post5, 0.0),
+        vac_carries_rb=np.where(cand.pos_group == "RB", cand.carries_post5, 0.0),
+        vac_qb=(cand.pos_group == "QB").astype(float),
+    ).groupby(["team", "k_t"], as_index=False)[["vac_targets", "vac_carries", "vac_targets_wrte", "vac_carries_rb", "vac_qb"]].sum()
+    out = out.merge(tg[["team", "k", "game_order"]].rename(columns={"k": "k_t"}), on=["team", "k_t"]).drop(columns="k_t")
+    return out
+
+
+def build_features(df: pd.DataFrame, extra_games=None, absences=None):
     if len(df) and df["league"].iloc[0] == "mlb":
         from features_mlb import build_features_mlb
         return build_features_mlb(df, extra_games)
@@ -64,6 +114,20 @@ def build_features(df: pd.DataFrame, extra_games=None):
     df = df.merge(d[["opponent", "pos_group", "game_order"] + dcols],
                   on=["opponent", "pos_group", "game_order"], how="left")
     feats += dcols
+
+    # --- Opportunity (NFL): target share, air yards share, WOPR, over the last 3 / 5 games ---
+    for col in ["target_share", "air_yards_share", "wopr", "receiving_air_yards"]:
+        if col in df and df[col].notna().any():
+            for w in (3, 5):
+                df[f"{col}_r{w}"] = _rolling_prior(df, ["player_id"], col, w)
+                feats.append(f"{col}_r{w}")
+
+    # --- Teammates who are out: opportunity up for grabs ---
+    vac = vacated_opportunity(df, absences)
+    df = df.merge(vac, on=["team", "game_order"], how="left")
+    vcols = ["vac_targets", "vac_carries", "vac_targets_wrte", "vac_carries_rb", "vac_qb"]
+    df[vcols] = df[vcols].fillna(0.0)
+    feats += vcols
 
     # --- Game environment from the betting market ---
     df["implied_team_total"] = df["game_total"] / 2 + df["team_spread"] / 2

@@ -7,10 +7,10 @@ import streamlit as st
 
 from config import BOOKS, MARKETS, markets_for
 from parlay import build_parlays
-from picklog import LOG_PATH, grade_log, load_log, save_picks
+from picklog import LOG_PATH, capture_closing, grade_log, load_log, save_picks
 from pipeline import get_models, live_games, live_props, load_history, seasons_for
 from sgp import american_to_dec, build_sgps, correlation_table
-from slate import build_slate
+from slate import UNAVAILABLE, build_slate
 
 st.set_page_config(page_title="Gridiron Props", page_icon="🏈", layout="wide")
 st.markdown("""
@@ -147,6 +147,8 @@ def leg_table(rows, mlb=False):
              "Book says": f"{r['p_market']:.0%}", "Price": american(r["decimal"]), "Book": r["book"]}
         if mlb:
             d["Lineup"] = r.get("lineup", "")
+        elif r.get("status"):
+            d["Status"] = r["status"]
         d["Game"] = r["game"]
         out.append(d)
     return pd.DataFrame(out)
@@ -211,9 +213,18 @@ def parlays_section(ns, legs, n_games, sports):
 
 def record_section(ns, league_names):
     st.write("Results fill in after each game (football: the next morning; MLB: once the game is final).")
-    if st.button("Update results", key=f"{ns}_grade"):
+    c1, c2 = st.columns(2)
+    if c1.button("Update results", key=f"{ns}_grade", width="stretch"):
         with st.spinner("Checking box scores…"):
             st.session_state["record"] = grade_log()
+    if c2.button("Record closing lines", key=f"{ns}_close", width="stretch", disabled=not ODDS_KEY,
+                 help="Tap within about an hour of game time. Re-prices your saved picks for games starting "
+                      "in the next 36 hours (about 2 credits per bet type per game)."):
+        with st.spinner("Checking current lines…"):
+            found, missing, left = capture_closing(ODDS_KEY, book_keys)
+        st.session_state["record"] = (load_log(), None)
+        st.success(f"Recorded closing lines for {found} picks" + (f" ({missing} lines no longer offered)" if missing else "")
+                   + (f". {left} credits left." if left else "."))
     log, s = st.session_state.get("record", (load_log(), None))
     log = log[log["league"].isin(league_names)] if not log.empty else log
     if not log.empty:
@@ -224,8 +235,17 @@ def record_section(ns, league_names):
         c1.metric("Single bets", f"{w}-{l}", f"{w / (w + l):.0%} hit rate" if w + l else None)
         c2.metric("Profit (1 unit per bet)", f"{profit:+.2f}u")
         c3.metric("Waiting on results", int(log.result.isna().sum()))
+        clv = log[log.kind == "single"]["clv_ev"].dropna()
+        if len(clv):
+            d1, d2 = st.columns(2)
+            d1.metric("Beat the closing line", f"{(clv > 0).mean():.0%}", f"{len(clv)} picks checked")
+            d2.metric("Average closing line value", f"{clv.mean():+.1%}")
+            st.caption("Closing line value is the best early test of a real edge: if your prices are consistently "
+                       "better than where the market closes, the picks are good even before enough results come in.")
         st.caption("At typical -110 prices you need to win 52.4% of single bets to break even.")
-        st.dataframe(log[["logged_at", "kind", "player", "market", "side", "line", "actual", "result", "book"]]
+        show = log.assign(Bet=[bet_text(s, float(l), MARKETS[m]["label"]) for s, l, m in zip(log.side, log.line, log.market)],
+                          CLV=log["clv_ev"].map(lambda v: "" if pd.isna(v) else f"{v:+.1%}"))
+        st.dataframe(show[["logged_at", "kind", "player", "Bet", "book", "CLV", "actual", "result"]]
                      .iloc[::-1], hide_index=True, width="stretch")
     full = load_log()
     if not full.empty:
@@ -422,8 +442,12 @@ def sport_page(ns: str):
         return
 
     # MLB: batters not in the posted lineup / pitchers who aren't starting are never picks
-    blocked = legs["lineup"].isin(["Not in lineup", "Not the listed starter"]) if mlb and "lineup" in legs \
-        else pd.Series(False, index=legs.index)
+    if mlb and "lineup" in legs:
+        blocked = legs["lineup"].isin(["Not in lineup", "Not the listed starter"])
+    elif "status" in legs:
+        blocked = legs["status"].isin(UNAVAILABLE)      # Out, Doubtful, injured reserve...
+    else:
+        blocked = pd.Series(False, index=legs.index)
     if skip_one_plus:
         legs = legs[~((legs.side == "Over") & (legs.line == 0.5))]
         blocked = blocked.loc[legs.index]
@@ -455,9 +479,11 @@ def sport_page(ns: str):
             pitching_matchups(st.session_state.get(f"{ns}_sel", sel), cached_history("mlb", CFBD_KEY))
     with tabs[names[-2]]:
         st.write("Check these before betting. Big model-vs-book disagreements usually mean news the model "
-                 "can't see (an injury, a benching, a role change)." +
+                 "can't see (a benching, a role change, late injury news)." +
                  (" MLB players not in the posted lineup, or pitchers who aren't the listed starter, are also here; "
-                  "most books void those bets." if mlb else ""))
+                  "most books void those bets." if mlb else
+                  " Players listed Out, Doubtful, or on injured reserve are also here and never in your picks. "
+                  "The injury report comes out Wednesday to Friday, so re-run later in the week."))
         if not flagged.empty:
             st.dataframe(leg_table(flagged.sort_values("disagreement", ascending=False).to_dict("records"), mlb)
                          .drop(columns=["Hit chance"]), hide_index=True, width="stretch")
